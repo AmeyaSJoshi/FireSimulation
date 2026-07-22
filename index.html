@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Earth</title>
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="scene"></canvas>
+      <div id="loading">0%</div>
+      <section id="condition-panel" aria-live="polite">
+        <h1>Location</h1>
+        <dl>
+          <div>
+            <dt>Location</dt>
+            <dd id="location-value">--</dd>
+          </div>
+          <div>
+            <dt>Latitude</dt>
+            <dd id="latitude-value">--</dd>
+          </div>
+          <div>
+            <dt>Longitude</dt>
+            <dd id="longitude-value">--</dd>
+          </div>
+        </dl>
+      </section>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
