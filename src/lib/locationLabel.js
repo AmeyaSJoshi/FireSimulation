@@ -92,7 +92,7 @@ const US_STATE_CATALOG = [
 
 const EARTH_RADIUS_KM = 6371;
 
-export function findNearestCity(latitude, longitude, maxDistanceKm = 120) {
+export function findNearestCity(latitude, longitude, maxDistanceKm = 45) {
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
 
   let nearest = null;
@@ -105,14 +105,33 @@ export function findNearestCity(latitude, longitude, maxDistanceKm = 120) {
   return nearest;
 }
 
-export function formatLocationLabel(latitude, longitude) {
+// `isOcean`, when provided, is ground truth read from the actual Earth
+// texture pixel at the click (see terrainSampler.js) — not a guess. When
+// it's known, land and ocean are never confused with each other, because
+// the classification comes from the same image the user is looking at.
+// When it's unknown (sampler not ready yet), we fall back to the coarse
+// region name only, which can be imprecise at coastlines but is still
+// clearly labeled as approximate territory, never a specific city.
+export function formatLocationLabel(latitude, longitude, isOcean = null) {
+  if (isOcean === false) {
+    const nearest = findNearestCity(latitude, longitude);
+    if (nearest) return `Near ${nearest.city}, ${nearest.region}`;
+
+    const state = findNearestUsState(latitude, longitude);
+    if (state) return `${state.region}, United States`;
+
+    return continentName(latitude, longitude) ?? `Land (${latitude.toFixed(2)}, ${longitude.toFixed(2)})`;
+  }
+
+  if (isOcean === true) {
+    return oceanName(latitude, longitude);
+  }
+
+  // No ground truth yet: still avoid a wrong city name, but be explicit
+  // that this is an approximate region, not a confirmed place.
   const nearest = findNearestCity(latitude, longitude);
-  if (nearest) return `${nearest.city}, ${nearest.region}, ${nearest.country}`;
-
-  const state = findNearestUsState(latitude, longitude);
-  if (state) return `Rural area, ${state.region}, United States`;
-
-  return `Open area, Earth (${latitude.toFixed(2)}, ${longitude.toFixed(2)})`;
+  if (nearest && nearest.distanceKm <= 12) return `Near ${nearest.city}, ${nearest.region}`;
+  return `Approx. region — ${oceanName(latitude, longitude) ?? continentName(latitude, longitude) ?? 'unresolved'}`;
 }
 
 function findNearestUsState(latitude, longitude) {
@@ -125,6 +144,37 @@ function findNearestUsState(latitude, longitude) {
     if (!nearest || distanceKm < nearest.distanceKm) nearest = { ...state, distanceKm };
   }
   return nearest?.distanceKm <= 800 ? nearest : null;
+}
+
+// Coarse ocean/continent naming used only to pick a label string once land
+// vs. water is already known from the real pixel. Overlap between these
+// boxes is harmless here — it only affects which of two adjacent ocean/
+// continent *names* is shown, never whether land gets called ocean.
+function oceanName(latitude, longitude) {
+  const oceans = [
+    { name: 'North Pacific',  test: (la, lo) => la >= 0 && la <= 65 && (lo <= -100 || lo >= 100) },
+    { name: 'South Pacific',  test: (la, lo) => la < 0 && la >= -60 && (lo <= -70 || lo >= 140) },
+    { name: 'North Atlantic', test: (la, lo) => la >= 5 && la <= 65 && lo >= -80 && lo <= 0 },
+    { name: 'South Atlantic', test: (la, lo) => la < 5 && la >= -60 && lo >= -55 && lo <= 20 },
+    { name: 'Indian Ocean',   test: (la, lo) => la >= -60 && la <= 30 && lo >= 20 && lo <= 120 },
+    { name: 'Southern Ocean', test: (la) => la < -60 },
+    { name: 'Arctic Ocean',   test: (la) => la > 66 }
+  ];
+  return oceans.find((o) => o.test(latitude, longitude))?.name ?? 'Open ocean';
+}
+
+function continentName(latitude, longitude) {
+  const continents = [
+    { name: 'Continental Europe', test: (la, lo) => la >= 36 && la <= 71 && lo >= -10 && lo <= 40 },
+    { name: 'North America',      test: (la, lo) => la >= 15 && la <= 72 && lo >= -170 && lo <= -50 },
+    { name: 'South America',      test: (la, lo) => la >= -55 && la <= 12 && lo >= -82 && lo <= -34 },
+    { name: 'Africa',             test: (la, lo) => la >= -35 && la <= 37 && lo >= -18 && lo <= 51 },
+    { name: 'Asia',               test: (la, lo) => la >= 0 && la <= 75 && lo >= 40 && lo <= 180 },
+    { name: 'Australia',          test: (la, lo) => la >= -45 && la <= -10 && lo >= 110 && lo <= 155 },
+    { name: 'Antarctica',         test: (la) => la <= -60 },
+    { name: 'Arctic land',        test: (la) => la >= 70 }
+  ];
+  return continents.find((c) => c.test(latitude, longitude))?.name ?? null;
 }
 
 export function haversineDistanceKm(latitudeA, longitudeA, latitudeB, longitudeB) {

@@ -3,28 +3,40 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Earth</title>
+    <title>IGNIS — Global Fire Simulation</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600&family=JetBrains+Mono:wght@400;500&display=swap" />
   </head>
   <body>
     <div id="app">
       <canvas id="scene"></canvas>
-      <div id="loading">0%</div>
+      <div id="loading">Loading terrain</div>
+
       <section id="condition-panel" aria-live="polite">
-        <h1>Location</h1>
+        <div class="panel-header">
+          <span class="panel-eyebrow">Ignition target</span>
+          <span class="panel-index">IGN—01</span>
+        </div>
+        <h1 id="location-value">Awaiting selection</h1>
         <dl>
-          <div>
-            <dt>Location</dt>
-            <dd id="location-value">--</dd>
-          </div>
-          <div>
+          <div class="field">
             <dt>Latitude</dt>
-            <dd id="latitude-value">--</dd>
+            <dd id="latitude-value" class="numeric placeholder">· · . · · · ·</dd>
           </div>
-          <div>
+          <div class="field">
             <dt>Longitude</dt>
-            <dd id="longitude-value">--</dd>
+            <dd id="longitude-value" class="numeric placeholder">· · · . · · · ·</dd>
           </div>
         </dl>
+        <div class="panel-status" id="panel-status" data-mode="waiting">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="status-text">Select a location to arm ignition</span>
+        </div>
+        <div class="panel-footer">
+          <span>Ignis · Global model</span>
+          <span class="callsign">v0.1</span>
+        </div>
       </section>
     </div>
     <script type="module" src="/src/main.js"></script>
