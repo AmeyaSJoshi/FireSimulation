@@ -5,8 +5,12 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
-import { cartesianToLatitudeLongitude } from './lib/coordinateMath.js';
+import { cartesianToLatitudeLongitude, latitudeLongitudeToCartesian } from './lib/coordinateMath.js';
+import { fetchElevationField, quantizeElevationCacheKey } from './lib/elevationField.js';
+import { canIgniteSurface, surfaceIgnitionMessage } from './lib/ignitionPolicy.js';
 import { formatLocationLabel } from './lib/locationLabel.js';
+import { buildSpreadExplanation, formatCompassDirection, formatElevationRange, formatModelTime } from './lib/scenarioInterpretation.js';
+import { clearScenarioRecords, compareScenarioMetrics, loadScenarioRecords, saveScenarioRecord } from './lib/scenarioRecords.js';
 import { createTerrainSampler } from './lib/terrainSampler.js';
 import './styles.css';
 
@@ -20,6 +24,60 @@ const latitudeValue = document.querySelector('#latitude-value');
 const longitudeValue = document.querySelector('#longitude-value');
 const panelStatus = document.querySelector('#panel-status');
 const statusText = document.querySelector('#status-text');
+const scenarioSelect = document.querySelector('#scenario-select');
+const fuelSelect = document.querySelector('#fuel-select');
+const windSpeedInput = document.querySelector('#wind-speed');
+const windSpeedValue = document.querySelector('#wind-speed-value');
+const windDirectionInput = document.querySelector('#wind-direction');
+const windDirectionValue = document.querySelector('#wind-direction-value');
+const moistureInput = document.querySelector('#moisture');
+const moistureValue = document.querySelector('#moisture-value');
+const slopeInput = document.querySelector('#slope-strength');
+const slopeValue = document.querySelector('#slope-value');
+const pauseButton = document.querySelector('#pause-button');
+const resetButton = document.querySelector('#reset-button');
+const simulationReadout = document.querySelector('#simulation-readout');
+const simulationNote = document.querySelector('.simulation-note');
+const footprintValue = document.querySelector('#footprint-value');
+const perimeterValue = document.querySelector('#perimeter-value');
+const scaleValue = document.querySelector('#scale-value');
+const modelTimeValue = document.querySelector('#model-time-value');
+const burnedAreaValue = document.querySelector('#burned-area-value');
+const maxSpreadValue = document.querySelector('#max-spread-value');
+const spreadRateValue = document.querySelector('#spread-rate-value');
+const modelValue = document.querySelector('#model-value');
+const terrainValue = document.querySelector('#terrain-value');
+const elevationValue = document.querySelector('#elevation-value');
+const fuelBasisValue = document.querySelector('#fuel-basis-value');
+const windBasisValue = document.querySelector('#wind-basis-value');
+const moistureBasisValue = document.querySelector('#moisture-basis-value');
+const slopeBasisValue = document.querySelector('#slope-basis-value');
+const seedValue = document.querySelector('#seed-value');
+const metadataState = document.querySelector('#metadata-state');
+const interpretationText = document.querySelector('#interpretation-text');
+const directionValue = document.querySelector('#direction-value');
+const guideScale = document.querySelector('#guide-scale');
+const clearHistoryButton = document.querySelector('#clear-history-button');
+const runHistoryList = document.querySelector('#run-history-list');
+
+const FIRE_GRID_SIZE = 128;
+const FIRE_CELL_SIZE_KM = 1;
+const FIRE_FIELD_DIAMETER_KM = FIRE_GRID_SIZE * FIRE_CELL_SIZE_KM;
+const FIRE_DISPLAY_SCALE = 6;
+const MODEL_TIMESTEP_MINUTES = 1;
+const SIMULATION_SEED = 17;
+// Phase 1 feature flag: which simulation engine the worker should run.
+// 'legacy'   = the incumbent cellular model in fireSimulation.js.
+// 'phase1'   = present for wiring; still delegates to the legacy model
+//              (no behavior change until Phase 3 introduces real physics).
+const SIMULATION_ENGINE = 'legacy';
+const EARTH_RADIUS_KM = 6371;
+const SCENARIO_PRESETS = {
+  calm: { scenario: 'calm', windSpeed: 0, windDirection: 0, moisture: 32, slope: 0 },
+  wind: { scenario: 'calm', windSpeed: 45, windDirection: 45, moisture: 24, slope: 10 },
+  slope: { scenario: 'slope', windSpeed: 0, windDirection: 0, moisture: 30, slope: 100 },
+  barrier: { scenario: 'barrier', windSpeed: 0, windDirection: 0, moisture: 28, slope: 0 }
+};
 
 // ─────────────────────────────────────────────────────────────
 // Renderer & scene
@@ -73,6 +131,22 @@ scene.add(earthSpinGroup);
 let earthModel = null;
 let atmosphereMesh = null;
 let earthMaterial = null;
+let earthRadius = null;
+
+const fireWorker = new Worker(new URL('./workers/fireWorker.js', import.meta.url), { type: 'module' });
+let fireOverlay = null;
+let fireTexture = null;
+let fireMaterial = null;
+let fireRunId = 0;
+let terrainRequestId = 0;
+let fireRunning = false;
+let firePaused = false;
+const terrainCache = new Map();
+const TERRAIN_CACHE_LIMIT = 12;
+let terrainMetadataStatus = 'Awaiting land';
+let terrainMetadataHeights = null;
+let scenarioRecords = loadScenarioRecords();
+let activeScenarioContext = null;
 
 // ─────────────────────────────────────────────────────────────
 // Starfield — procedural, spherical distribution, gentle twinkle
@@ -439,7 +513,7 @@ fbxLoader.load(
     const size = new THREE.Vector3();
     box.getSize(size);
     // For a sphere mesh, x/y/z should be equal (or close). Use the max half-extent.
-    const earthRadius = Math.max(size.x, size.y, size.z) * 0.5;
+    earthRadius = Math.max(size.x, size.y, size.z) * 0.5;
     atmosphereMesh = createAtmosphere(earthRadius);
     earthSpinGroup.add(atmosphereMesh);
 
@@ -484,7 +558,24 @@ function handleGlobeClick(event) {
     : null;
 
   updateConditionPanel(coordinates, isOcean);
+
+  if (!canIgniteSurface(isOcean)) {
+    resetFireSimulation();
+    if (markerGroup) markerGroup.visible = false;
+    panelStatus.dataset.mode = 'blocked';
+    statusText.textContent = surfaceIgnitionMessage(isOcean);
+    simulationReadout.textContent = isOcean === true
+      ? 'Select a land surface to ignite'
+      : 'Surface classification unavailable · try again';
+    simulationNote.textContent = isOcean === true
+      ? 'Ocean surface · fire ignition disabled'
+      : 'Surface classification required before ignition';
+    setTerrainMetadata(isOcean === true ? 'Ocean · no ignition' : 'Surface unknown');
+    return;
+  }
+
   placeMarker(localHitPoint);
+  startFireSimulation(coordinates);
 }
 
 function updateConditionPanel(coordinates, isOcean) {
@@ -557,6 +648,453 @@ function updateMarker() {
   // Hide when facing away, with a small tolerance for the ping halo
   markerGroup.visible = outward.dot(towardCamera) > -0.08;
 }
+
+function createFireOverlay(surfacePoint, radius) {
+  if (fireOverlay) {
+    earthSpinGroup.remove(fireOverlay);
+    fireOverlay.geometry.dispose();
+    fireOverlay.material.dispose();
+  }
+  fireTexture?.dispose();
+
+  const segments = 72;
+  const patchRadius = radius * (FIRE_FIELD_DIAMETER_KM / (2 * EARTH_RADIUS_KM)) * FIRE_DISPLAY_SCALE;
+  const normal = surfacePoint.clone().normalize();
+  const reference = Math.abs(normal.y) < 0.9
+    ? new THREE.Vector3(0, 1, 0)
+    : new THREE.Vector3(1, 0, 0);
+  const east = new THREE.Vector3().crossVectors(reference, normal).normalize();
+  const north = new THREE.Vector3().crossVectors(normal, east).normalize();
+  const positions = [];
+  const uvs = [];
+  const indices = [];
+
+  for (let y = 0; y <= segments; y += 1) {
+    for (let x = 0; x <= segments; x += 1) {
+      const offsetX = (x / segments - 0.5) * patchRadius * 2;
+      const offsetY = (y / segments - 0.5) * patchRadius * 2;
+      const distance = Math.hypot(offsetX, offsetY);
+      const tangent = new THREE.Vector3()
+        .addScaledVector(east, offsetX)
+        .addScaledVector(north, offsetY);
+      const direction = distance > 0 ? tangent.normalize() : east;
+      const angle = distance / radius;
+      const point = normal.clone()
+        .multiplyScalar(Math.cos(angle))
+        .addScaledVector(direction, Math.sin(angle))
+        .multiplyScalar(radius * 1.006);
+      positions.push(point.x, point.y, point.z);
+      uvs.push(x / segments, 1 - y / segments);
+    }
+  }
+
+  for (let y = 0; y < segments; y += 1) {
+    for (let x = 0; x < segments; x += 1) {
+      const row = segments + 1;
+      const a = y * row + x;
+      const b = a + 1;
+      const c = a + row;
+      const d = c + 1;
+      indices.push(a, c, b, b, c, d);
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+
+  fireTexture = new THREE.DataTexture(
+    new Uint8Array(FIRE_GRID_SIZE * FIRE_GRID_SIZE * 4),
+    FIRE_GRID_SIZE,
+    FIRE_GRID_SIZE,
+    THREE.RGBAFormat,
+    THREE.UnsignedByteType
+  );
+  fireTexture.minFilter = THREE.LinearFilter;
+  fireTexture.magFilter = THREE.LinearFilter;
+  fireTexture.wrapS = THREE.ClampToEdgeWrapping;
+  fireTexture.wrapT = THREE.ClampToEdgeWrapping;
+  fireTexture.needsUpdate = true;
+
+  fireMaterial = new THREE.ShaderMaterial({
+    uniforms: {
+      uFireMap: { value: fireTexture },
+      uTime: { value: 0 }
+    },
+    transparent: true,
+    depthTest: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending,
+    vertexShader: /* glsl */`
+      varying vec2 vUv;
+      varying vec3 vWorldPosition;
+      void main() {
+        vUv = uv;
+        vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+        vWorldPosition = worldPosition.xyz;
+        gl_Position = projectionMatrix * viewMatrix * worldPosition;
+      }
+    `,
+    fragmentShader: /* glsl */`
+      uniform sampler2D uFireMap;
+      uniform float uTime;
+      varying vec2 vUv;
+      varying vec3 vWorldPosition;
+      void main() {
+        vec4 fire = texture2D(uFireMap, vUv);
+        vec2 texel = vec2(1.0 / 128.0);
+        float neighborAlpha = min(
+          min(texture2D(uFireMap, vUv + vec2(texel.x, 0.0)).a, texture2D(uFireMap, vUv - vec2(texel.x, 0.0)).a),
+          min(texture2D(uFireMap, vUv + vec2(0.0, texel.y)).a, texture2D(uFireMap, vUv - vec2(0.0, texel.y)).a)
+        );
+        float perimeter = smoothstep(0.04, 0.22, fire.a) * (1.0 - smoothstep(0.03, 0.2, neighborAlpha));
+        float pulse = 0.92 + 0.08 * sin(uTime * 5.5 + vUv.x * 12.0 + vUv.y * 8.0);
+        float edgeFade = smoothstep(0.0, 0.08, vUv.x) * smoothstep(1.0, 0.92, vUv.x)
+          * smoothstep(0.0, 0.08, vUv.y) * smoothstep(1.0, 0.92, vUv.y);
+        vec3 perimeterColor = vec3(1.0, 0.56, 0.08);
+        vec3 color = mix(fire.rgb, perimeterColor, perimeter * 0.72);
+        float alpha = max(fire.a, perimeter * 0.8);
+        gl_FragColor = vec4(color * pulse * 1.25, alpha * pulse * edgeFade);
+      }
+    `
+  });
+
+  fireOverlay = new THREE.Mesh(geometry, fireMaterial);
+  fireOverlay.renderOrder = 8;
+  earthSpinGroup.add(fireOverlay);
+  return fireOverlay;
+}
+
+function getSimulationParams() {
+  return {
+    fuelPreset: fuelSelect.value,
+    windSpeed: Number(windSpeedInput.value),
+    windDirection: Number(windDirectionInput.value),
+    moisture: Number(moistureInput.value) / 100,
+    slopeStrength: Number(slopeInput.value) / 100
+  };
+}
+
+function getScenarioConfig() {
+  return SCENARIO_PRESETS[scenarioSelect.value] ?? SCENARIO_PRESETS.calm;
+}
+
+function applyScenarioPreset() {
+  const preset = getScenarioConfig();
+  windSpeedInput.value = String(preset.windSpeed);
+  windDirectionInput.value = String(preset.windDirection);
+  moistureInput.value = String(preset.moisture);
+  slopeInput.value = String(preset.slope);
+  updateSimulationLabels();
+  if (fireRunning) {
+    fireWorker.postMessage({
+      type: 'update',
+      scenario: preset.scenario,
+      params: getSimulationParams()
+    });
+    simulationReadout.textContent = 'Scenario updated · recalculating field';
+  }
+}
+
+function updateSimulationLabels() {
+  windSpeedValue.textContent = `${windSpeedInput.value} km/h`;
+  windDirectionValue.textContent = `${windDirectionInput.value.padStart(3, '0')}°`;
+  moistureValue.textContent = `${moistureInput.value}%`;
+  slopeValue.textContent = `${slopeInput.value}%`;
+  updateScenarioMetadata();
+}
+
+function setTerrainMetadata(status, heights = null) {
+  terrainMetadataStatus = status;
+  terrainMetadataHeights = heights;
+  updateScenarioMetadata();
+}
+
+function updateScenarioMetadata() {
+  const fuelLabel = fuelSelect.selectedOptions[0]?.textContent ?? fuelSelect.value;
+  const windDirection = windDirectionInput.value.padStart(3, '0');
+  modelValue.textContent = `Cellular · ${SIMULATION_ENGINE} · ${MODEL_TIMESTEP_MINUTES} min/tick`;
+  terrainValue.textContent = terrainMetadataStatus;
+  elevationValue.textContent = formatElevationRange(terrainMetadataHeights);
+  fuelBasisValue.textContent = fuelLabel;
+  windBasisValue.textContent = `${windDirection}° · ${windSpeedInput.value} km/h`;
+  moistureBasisValue.textContent = `${moistureInput.value}%`;
+  slopeBasisValue.textContent = `${slopeInput.value}%`;
+  scaleValue.textContent = `${FIRE_CELL_SIZE_KM} km cells · ${FIRE_FIELD_DIAMETER_KM} km field`;
+  seedValue.textContent = String(SIMULATION_SEED);
+  metadataState.textContent = terrainMetadataStatus;
+  guideScale.textContent = `${FIRE_FIELD_DIAMETER_KM} km field`;
+}
+
+function formatSignedMetric(value, unit) {
+  const rounded = Math.round(Number(value) || 0);
+  if (rounded === 0) return '— vs prior';
+  const sign = rounded > 0 ? '+' : '';
+  return `${sign}${rounded.toLocaleString()} ${unit} vs prior`;
+}
+
+function createHistoryMetric(label, value) {
+  const wrapper = document.createElement('span');
+  wrapper.className = 'history-metric';
+  const labelEl = document.createElement('small');
+  labelEl.textContent = label;
+  const valueEl = document.createElement('strong');
+  valueEl.textContent = value;
+  wrapper.append(labelEl, valueEl);
+  return wrapper;
+}
+
+function renderScenarioHistory() {
+  if (!runHistoryList) return;
+  runHistoryList.replaceChildren();
+  if (scenarioRecords.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'history-empty';
+    empty.textContent = 'Complete a run to save it here.';
+    runHistoryList.append(empty);
+    return;
+  }
+
+  scenarioRecords.forEach((record, index) => {
+    const card = document.createElement('article');
+    card.className = 'history-card';
+    const header = document.createElement('div');
+    header.className = 'history-card-header';
+    const title = document.createElement('strong');
+    title.textContent = record.location || 'Saved ignition';
+    const replay = document.createElement('button');
+    replay.type = 'button';
+    replay.className = 'history-replay';
+    replay.dataset.runId = record.id;
+    replay.setAttribute('aria-label', `Replay ${record.location || 'saved ignition'}`);
+    replay.textContent = 'Replay';
+    header.append(title, replay);
+    const basis = document.createElement('span');
+    basis.className = 'history-basis';
+    basis.textContent = `${record.scenarioLabel || 'Custom'} · ${record.terrain || 'Terrain unavailable'} · seed ${record.seed ?? SIMULATION_SEED}`;
+    const metrics = document.createElement('div');
+    metrics.className = 'history-metrics';
+    const data = record.metrics || {};
+    metrics.append(
+      createHistoryMetric('Burned', `${Math.round(data.burnedAreaKm2 ?? 0).toLocaleString()} km²`),
+      createHistoryMetric('Time', formatModelTime(data.elapsedMinutes ?? 0)),
+      createHistoryMetric('Spread', `${Number(data.maxSpreadDistanceKm ?? 0).toFixed(1)} km`)
+    );
+    card.append(header, basis, metrics);
+    if (scenarioRecords[index + 1]) {
+      const delta = compareScenarioMetrics(scenarioRecords[index + 1].metrics, data);
+      const deltaLine = document.createElement('span');
+      deltaLine.className = 'history-delta';
+      deltaLine.textContent = formatSignedMetric(delta.burnedAreaKm2, 'km² burned');
+      card.append(deltaLine);
+    }
+    runHistoryList.append(card);
+  });
+}
+
+function recordSettledScenario(metrics) {
+  if (!activeScenarioContext || activeScenarioContext.recorded) return;
+  activeScenarioContext.recorded = true;
+  const record = {
+    id: `run-${Date.now()}-${fireRunId}`,
+    createdAt: Date.now(),
+    location: activeScenarioContext.location,
+    coordinates: activeScenarioContext.coordinates,
+    scenario: scenarioSelect.value,
+    scenarioLabel: scenarioSelect.selectedOptions[0]?.textContent ?? scenarioSelect.value,
+    params: getSimulationParams(),
+    terrain: terrainMetadataStatus,
+    elevationRange: formatElevationRange(terrainMetadataHeights),
+    seed: SIMULATION_SEED,
+    metrics: {
+      burnedAreaKm2: metrics.burnedAreaKm2 ?? 0,
+      footprintAreaKm2: metrics.footprintAreaKm2 ?? 0,
+      perimeterKm: metrics.perimeterKm ?? 0,
+      maxSpreadDistanceKm: metrics.maxSpreadDistanceKm ?? 0,
+      averageSpreadRateKmh: metrics.averageSpreadRateKmh ?? 0,
+      elapsedMinutes: metrics.elapsedMinutes ?? 0,
+      dominantSpreadDirectionDeg: metrics.dominantSpreadDirectionDeg ?? 0
+    }
+  };
+  scenarioRecords = saveScenarioRecord(undefined, record);
+  renderScenarioHistory();
+}
+
+function replayScenario(record) {
+  if (!earthRadius || !record?.coordinates) return;
+  const params = record.params ?? {};
+  scenarioSelect.value = record.scenario ?? 'calm';
+  fuelSelect.value = params.fuelPreset ?? 'brush';
+  windSpeedInput.value = String(params.windSpeed ?? 0);
+  windDirectionInput.value = String(params.windDirection ?? 0);
+  moistureInput.value = String(Math.round((params.moisture ?? 0) * 100));
+  slopeInput.value = String(Math.round((params.slopeStrength ?? 0) * 100));
+  updateSimulationLabels();
+  const point = latitudeLongitudeToCartesian({ ...record.coordinates, radius: earthRadius });
+  const localPoint = new THREE.Vector3(point.x, point.y, point.z);
+  updateConditionPanel(record.coordinates, false);
+  placeMarker(localPoint);
+  startFireSimulation(record.coordinates);
+}
+
+async function startFireSimulation(coordinates) {
+  if (!earthRadius || !markerSurfacePoint.length()) return;
+  const requestId = ++terrainRequestId;
+  fireRunId += 1;
+  createFireOverlay(markerSurfacePoint, earthRadius);
+  fireRunning = true;
+  firePaused = false;
+  activeScenarioContext = {
+    coordinates: { latitude: coordinates.latitude, longitude: coordinates.longitude },
+    location: locationValue.textContent,
+    recorded: false
+  };
+  pauseButton.disabled = false;
+  resetButton.disabled = false;
+  pauseButton.textContent = 'Pause';
+  pauseButton.setAttribute('aria-label', 'Pause simulation');
+  panelStatus.dataset.mode = 'running';
+  statusText.textContent = 'Loading terrain · local elevation';
+  simulationReadout.textContent = 'Loading terrain field · preparing fire grid';
+  modelTimeValue.textContent = '0 min';
+  burnedAreaValue.textContent = '0 km²';
+  footprintValue.textContent = '0 km²';
+  perimeterValue.textContent = '0 km';
+  maxSpreadValue.textContent = '0 km';
+  spreadRateValue.textContent = '0 km/h';
+  interpretationText.textContent = 'Preparing terrain and ignition field';
+  directionValue.textContent = 'Spread direction · —';
+  setTerrainMetadata('Loading GLO-90');
+  const scenarioConfig = getScenarioConfig();
+  const cacheKey = quantizeElevationCacheKey(
+    coordinates.latitude,
+    coordinates.longitude,
+    FIRE_FIELD_DIAMETER_KM
+  );
+  const cacheEntry = terrainCache.get(cacheKey);
+  let terrainHeights = cacheEntry?.heights?.slice() ?? null;
+  if (terrainHeights) {
+    simulationNote.textContent = `Cached GLO-90 terrain · ${FIRE_FIELD_DIAMETER_KM} km field · overlay ×${FIRE_DISPLAY_SCALE}`;
+    setTerrainMetadata('Cached GLO-90', terrainHeights);
+  } else {
+    try {
+      const terrain = await fetchElevationField({
+        latitude: coordinates.latitude,
+        longitude: coordinates.longitude,
+        targetSize: FIRE_GRID_SIZE,
+        spanKm: FIRE_FIELD_DIAMETER_KM
+      });
+      if (requestId !== terrainRequestId) return;
+      terrainHeights = terrain.heights;
+      // Cache stores provenance alongside the height buffer so Phase 2
+      // freshness policy can consult { fetchedAt, source } without a re-fetch.
+      terrainCache.set(cacheKey, {
+        heights: terrainHeights.slice(),
+        fetchedAt: terrain.fetchedAt,
+        source: terrain.source
+      });
+      while (terrainCache.size > TERRAIN_CACHE_LIMIT) terrainCache.delete(terrainCache.keys().next().value);
+      simulationNote.textContent = `GLO-90 terrain loaded · ${FIRE_FIELD_DIAMETER_KM} km field · overlay ×${FIRE_DISPLAY_SCALE}`;
+      setTerrainMetadata('GLO-90 loaded', terrainHeights);
+    } catch (error) {
+      if (requestId !== terrainRequestId) return;
+      console.warn('[terrain] elevation unavailable, using synthetic fallback:', error);
+      simulationNote.textContent = 'Terrain unavailable · synthetic fallback active';
+      setTerrainMetadata('Synthetic fallback');
+    }
+  }
+
+  if (requestId !== terrainRequestId) return;
+  const transferredHeights = terrainHeights?.slice() ?? null;
+  const message = {
+    type: 'start',
+    config: {
+      runId: fireRunId,
+      engine: SIMULATION_ENGINE,
+      size: FIRE_GRID_SIZE,
+      cellSizeKm: FIRE_CELL_SIZE_KM,
+      seed: SIMULATION_SEED,
+      scenario: scenarioConfig.scenario,
+      params: getSimulationParams(),
+      speed: 1,
+      timestepMinutes: MODEL_TIMESTEP_MINUTES,
+      ignition: { x: 64, y: 64 },
+      terrainHeights: transferredHeights
+    }
+  };
+  if (terrainHeights) fireWorker.postMessage(message, [terrainHeights.buffer]);
+  else fireWorker.postMessage(message);
+}
+
+function resetFireSimulation() {
+  terrainRequestId += 1;
+  fireRunId += 1;
+  fireWorker.postMessage({ type: 'stop' });
+  fireRunning = false;
+  firePaused = false;
+  activeScenarioContext = null;
+  if (fireOverlay) fireOverlay.visible = false;
+  pauseButton.disabled = true;
+  pauseButton.textContent = 'Pause';
+  pauseButton.setAttribute('aria-label', 'Pause simulation');
+  resetButton.disabled = true;
+  panelStatus.dataset.mode = 'armed';
+  statusText.textContent = 'Location armed · ignition ready';
+  simulationReadout.textContent = 'Click the globe to ignite a local scenario';
+  modelTimeValue.textContent = '—';
+  burnedAreaValue.textContent = '—';
+  footprintValue.textContent = '—';
+  perimeterValue.textContent = '—';
+  maxSpreadValue.textContent = '—';
+  spreadRateValue.textContent = '—';
+  interpretationText.textContent = 'Click land to begin a scenario';
+  directionValue.textContent = 'Spread direction · —';
+  simulationNote.textContent = 'Synthetic educational model · 1 min/tick · terrain loads on ignition';
+}
+
+fireWorker.onmessage = ({ data }) => {
+  if (data.type !== 'frame' || data.runId && data.runId !== fireRunId) return;
+  if (!fireTexture || !fireMaterial) return;
+  fireTexture.image.data = data.frame;
+  fireTexture.needsUpdate = true;
+  firePaused = data.paused;
+  pauseButton.textContent = firePaused ? 'Resume' : 'Pause';
+  pauseButton.setAttribute('aria-label', firePaused ? 'Resume simulation' : 'Pause simulation');
+  if (data.terrainAvailable) {
+    simulationNote.textContent = `GLO-90 terrain loaded · ${FIRE_FIELD_DIAMETER_KM} km field · overlay ×${FIRE_DISPLAY_SCALE}`;
+  }
+  const metrics = data.metrics ?? {};
+  const direction = formatCompassDirection(metrics.dominantSpreadDirectionDeg ?? 0);
+  const params = getSimulationParams();
+  simulationReadout.textContent = `${data.stepCount.toString().padStart(3, '0')} ticks · ${formatModelTime(metrics.elapsedMinutes ?? 0)} · ${Math.round(metrics.burnedAreaKm2 ?? 0).toLocaleString()} km² burned`;
+  modelTimeValue.textContent = formatModelTime(metrics.elapsedMinutes ?? 0);
+  burnedAreaValue.textContent = `${Math.round(metrics.burnedAreaKm2 ?? 0).toLocaleString()} km²`;
+  footprintValue.textContent = `${Math.round(metrics.footprintAreaKm2 ?? 0).toLocaleString()} km²`;
+  perimeterValue.textContent = `${Math.round(metrics.perimeterKm ?? 0).toLocaleString()} km`;
+  maxSpreadValue.textContent = `${(metrics.maxSpreadDistanceKm ?? 0).toFixed(1)} km`;
+  spreadRateValue.textContent = `${(metrics.averageSpreadRateKmh ?? 0).toFixed(1)} km/h`;
+  directionValue.textContent = `Spread direction · ${direction} · ${Math.round(metrics.dominantSpreadDirectionDeg ?? 0)}°`;
+  interpretationText.textContent = buildSpreadExplanation({
+    direction,
+    windSpeed: params.windSpeed,
+    slopeStrength: params.slopeStrength,
+    moisture: params.moisture
+  });
+  if (firePaused) {
+    panelStatus.dataset.mode = 'armed';
+    statusText.textContent = 'Simulation paused · resume when ready';
+  } else if (fireRunning && data.activeCount === 0 && data.stepCount > 10) {
+    panelStatus.dataset.mode = 'armed';
+    statusText.textContent = 'Simulation settled · click to ignite again';
+    recordSettledScenario(metrics);
+  } else if (fireRunning) {
+    panelStatus.dataset.mode = 'running';
+    statusText.textContent = 'Simulation running · local scenario';
+  }
+};
 
 // ─────────────────────────────────────────────────────────────
 // Camera framing
@@ -639,6 +1177,15 @@ function animate() {
   updatePings(now);
   controls.update();
   updateMarker();
+  if (fireOverlay && fireMaterial) {
+    fireMaterial.uniforms.uTime.value = timeSeconds;
+    const fireWorldPosition = fireOverlay.getWorldPosition(new THREE.Vector3());
+    const fireOutward = markerSurfacePoint.clone()
+      .normalize()
+      .transformDirection(earthSpinGroup.matrixWorld);
+    const fireTowardCamera = camera.position.clone().sub(fireWorldPosition).normalize();
+    fireOverlay.visible = fireOutward.dot(fireTowardCamera) > -0.08;
+  }
   composer.render();
   requestAnimationFrame(animate);
 }
@@ -701,10 +1248,41 @@ function resize() {
   bloomPass.setSize(window.innerWidth, window.innerHeight);
 }
 
+function handleSimulationControlChange() {
+  updateSimulationLabels();
+  if (fireRunning) {
+    fireWorker.postMessage({ type: 'configure', params: getSimulationParams() });
+    simulationReadout.textContent = 'Parameters updated · recalculating field';
+  }
+}
+
+function handleHistoryClick(event) {
+  const replayButton = event.target.closest('.history-replay');
+  if (!replayButton) return;
+  const record = scenarioRecords.find((item) => item.id === replayButton.dataset.runId);
+  if (record) replayScenario(record);
+}
+
 // ─────────────────────────────────────────────────────────────
 // Wire it up
 // ─────────────────────────────────────────────────────────────
 window.addEventListener('resize', resize);
+applyScenarioPreset();
+renderScenarioHistory();
+scenarioSelect.addEventListener('change', applyScenarioPreset);
+fuelSelect.addEventListener('change', handleSimulationControlChange);
+windSpeedInput.addEventListener('input', handleSimulationControlChange);
+windDirectionInput.addEventListener('input', handleSimulationControlChange);
+moistureInput.addEventListener('input', handleSimulationControlChange);
+slopeInput.addEventListener('input', handleSimulationControlChange);
+pauseButton.addEventListener('click', () => fireWorker.postMessage({ type: 'pause' }));
+resetButton.addEventListener('click', resetFireSimulation);
+runHistoryList?.addEventListener('click', handleHistoryClick);
+clearHistoryButton?.addEventListener('click', () => {
+  clearScenarioRecords();
+  scenarioRecords = [];
+  renderScenarioHistory();
+});
 canvas.addEventListener('wheel', handleZoomWheel, { capture: true, passive: false });
 canvas.addEventListener('pointerdown', handlePointerDown);
 canvas.addEventListener('pointermove', handlePointerMove);

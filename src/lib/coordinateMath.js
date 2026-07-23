@@ -26,6 +26,20 @@ export function cartesianToLatitudeLongitude(point) {
   };
 }
 
+export function latitudeLongitudeToCartesian({ latitude, longitude, radius = 1 }) {
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || !Number.isFinite(radius) || radius <= 0) {
+    throw new TypeError('Finite latitude, longitude, and positive radius are required');
+  }
+  const latitudeRadians = latitude * Math.PI / 180;
+  const longitudeRadians = (longitude - FBX_LONGITUDE_OFFSET_DEGREES) * Math.PI / 180;
+  const horizontalRadius = Math.cos(latitudeRadians) * radius;
+  return {
+    x: Math.sin(longitudeRadians) * horizontalRadius,
+    y: Math.sin(latitudeRadians) * radius,
+    z: Math.cos(longitudeRadians) * horizontalRadius
+  };
+}
+
 export function uvToLatitudeLongitude(uv) {
   if (!uv || !Number.isFinite(uv.x) || !Number.isFinite(uv.y)) {
     throw new TypeError('A finite texture UV coordinate is required');

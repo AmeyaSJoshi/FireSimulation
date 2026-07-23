@@ -12,6 +12,20 @@
     <div id="app">
       <canvas id="scene"></canvas>
       <div id="loading">Loading terrain</div>
+      <div id="scene-guide" aria-label="Simulation legend and scale">
+        <div class="guide-block">
+          <span class="guide-label">Fire state</span>
+          <div class="legend-items">
+            <span><i class="legend-swatch ember" aria-hidden="true"></i>Burning</span>
+            <span><i class="legend-swatch ember-dim" aria-hidden="true"></i>Burned</span>
+            <span><i class="legend-swatch ember-soft" aria-hidden="true"></i>Heating</span>
+          </div>
+        </div>
+        <div class="guide-block guide-reference">
+          <span class="north-marker" aria-label="North">N</span>
+          <span id="guide-scale">128 km field</span>
+        </div>
+      </div>
 
       <section id="condition-panel" aria-live="polite">
         <div class="panel-header">
@@ -37,6 +51,95 @@
           <span>Ignis · Global model</span>
           <span class="callsign">v0.1</span>
         </div>
+      </section>
+
+      <section id="simulation-panel" aria-label="Fire simulation controls">
+        <div class="panel-header compact">
+          <span class="panel-eyebrow">Scenario controls</span>
+          <span class="panel-index">SIM—01</span>
+        </div>
+        <div class="control-row">
+          <label for="scenario-select">Scenario</label>
+          <select id="scenario-select">
+            <option value="calm" selected>Calm / radial</option>
+            <option value="wind">Wind driven</option>
+            <option value="slope">Uphill spread</option>
+            <option value="barrier">Fuel barrier</option>
+          </select>
+        </div>
+        <div class="control-row">
+          <label for="fuel-select">Fuel</label>
+          <select id="fuel-select">
+            <option value="grass">Grassland</option>
+            <option value="brush" selected>Brush</option>
+            <option value="timber">Timber</option>
+          </select>
+        </div>
+        <div class="control-row range-row">
+          <label for="wind-speed">Wind <output id="wind-speed-value">18 km/h</output></label>
+          <input id="wind-speed" type="range" min="0" max="60" step="1" value="18" />
+        </div>
+        <div class="control-row range-row">
+          <label for="wind-direction">Direction <output id="wind-direction-value">045°</output></label>
+          <input id="wind-direction" type="range" min="0" max="359" step="1" value="45" />
+        </div>
+        <div class="control-row range-row">
+          <label for="moisture">Moisture <output id="moisture-value">32%</output></label>
+          <input id="moisture" type="range" min="0" max="100" step="1" value="32" />
+        </div>
+        <div class="control-row range-row">
+          <label for="slope-strength">Slope <output id="slope-value">20%</output></label>
+          <input id="slope-strength" type="range" min="0" max="100" step="1" value="20" />
+        </div>
+        <div class="simulation-actions">
+          <button id="pause-button" type="button" disabled aria-label="Pause simulation">Pause</button>
+          <button id="reset-button" type="button" disabled aria-label="Reset simulation">Reset</button>
+        </div>
+        <div id="simulation-readout" class="simulation-readout">Click the globe to ignite a local scenario</div>
+        <div class="simulation-metrics" aria-live="polite">
+          <div><span>Model time</span><strong id="model-time-value">—</strong></div>
+          <div><span>Burned area</span><strong id="burned-area-value">—</strong></div>
+          <div><span>Footprint</span><strong id="footprint-value">—</strong></div>
+          <div><span>Perimeter</span><strong id="perimeter-value">—</strong></div>
+          <div><span>Max spread</span><strong id="max-spread-value">—</strong></div>
+          <div><span>Avg rate</span><strong id="spread-rate-value">—</strong></div>
+        </div>
+        <div class="scenario-metadata" aria-label="Scenario metadata">
+          <div class="metadata-heading">
+            <span>Scenario basis</span>
+            <span id="metadata-state">Awaiting land</span>
+          </div>
+          <dl class="metadata-list">
+            <div><dt>Model</dt><dd id="model-value">Cellular · 1 min/tick</dd></div>
+            <div><dt>Terrain</dt><dd id="terrain-value">Awaiting land</dd></div>
+            <div><dt>Elevation</dt><dd id="elevation-value">—</dd></div>
+            <div><dt>Fuel</dt><dd id="fuel-basis-value">Brush · 1.00</dd></div>
+            <div><dt>Wind</dt><dd id="wind-basis-value">000° · 0 km/h</dd></div>
+            <div><dt>Moisture</dt><dd id="moisture-basis-value">32%</dd></div>
+            <div><dt>Slope</dt><dd id="slope-basis-value">0%</dd></div>
+            <div><dt>Scale</dt><dd id="scale-value">—</dd></div>
+            <div><dt>Seed</dt><dd id="seed-value">17</dd></div>
+          </dl>
+        </div>
+        <div class="interpretation-block">
+          <span class="metadata-heading">Interpretation</span>
+          <strong id="interpretation-text">Click land to begin a scenario</strong>
+          <span id="direction-value">Spread direction · —</span>
+        </div>
+        <div class="model-disclaimer">
+          Educational cellular model · not a forecast
+        </div>
+        <section class="run-history" aria-label="Recent simulation runs">
+          <div class="metadata-heading">
+            <span>Recent runs</span>
+            <button id="clear-history-button" type="button" aria-label="Clear recent runs">Clear</button>
+          </div>
+          <div id="run-history-list">
+            <p class="history-empty">Complete a run to save it here.</p>
+          </div>
+        </section>
+        <p class="terrain-attribution">Terrain: Copernicus GLO-90 via Open-Meteo · global, coarse-scale elevation</p>
+        <p class="simulation-note">Synthetic educational model · 1 min/tick · terrain loads on ignition</p>
       </section>
     </div>
     <script type="module" src="/src/main.js"></script>
