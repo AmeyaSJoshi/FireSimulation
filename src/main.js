@@ -12,6 +12,8 @@ import { formatLocationLabel } from './lib/locationLabel.js';
 import { buildSpreadExplanation, formatCompassDirection, formatElevationRange, formatModelTime } from './lib/scenarioInterpretation.js';
 import { clearScenarioRecords, compareScenarioMetrics, loadScenarioRecords, saveScenarioRecord } from './lib/scenarioRecords.js';
 import { createTerrainSampler } from './lib/terrainSampler.js';
+import { createCanvasImageReader, createLandCoverSource } from './lib/landCoverSource.js';
+import { crosswalkLandCoverToFuel } from './lib/landCoverToFuel.js';
 import './styles.css';
 
 // ─────────────────────────────────────────────────────────────
@@ -145,6 +147,8 @@ const terrainCache = new Map();
 const TERRAIN_CACHE_LIMIT = 12;
 let terrainMetadataStatus = 'Awaiting land';
 let terrainMetadataHeights = null;
+let lastLandCover = null;
+let lastFuelDecision = null;
 let scenarioRecords = loadScenarioRecords();
 let activeScenarioContext = null;
 
@@ -491,6 +495,40 @@ createTerrainSampler('/earth/textures/1_earth_8k.jpg')
   .then((sampler) => { terrainSampler = sampler; })
   .catch((error) => console.error('[terrain] sampler failed to load:', error));
 
+// Phase 2 land-cover source. The preprocessed WorldCover mosaic PNG lives
+// in public/ alongside its metadata sidecar. If either is missing (e.g.
+// preprocessing script has not been run in this workspace), the source
+// stays null and every classify call returns null — the crosswalk then
+// gracefully falls back to an experimental-confidence default.
+let landCoverSource = null;
+async function loadLandCoverSource() {
+  try {
+    const [meta, image] = await Promise.all([
+      fetch('/landcover-coarse.json').then((r) => r.ok ? r.json() : null),
+      loadImageElement('/landcover-coarse.png')
+    ]);
+    if (!meta || !image) return;
+    landCoverSource = await createLandCoverSource({
+      pngUrl: '/landcover-coarse.png',
+      meta,
+      imageReader: async () => createCanvasImageReader(image)
+    });
+    console.info('[landcover] loaded', meta.source, meta.mosaic);
+  } catch (error) {
+    console.warn('[landcover] source unavailable, falling back to experimental crosswalk:', error);
+  }
+}
+function loadImageElement(url) {
+  return new Promise((resolve) => {
+    const image = new Image();
+    image.crossOrigin = 'anonymous';
+    image.onload = () => resolve(image);
+    image.onerror = () => resolve(null);
+    image.src = url;
+  });
+}
+loadLandCoverSource();
+
 const fbxLoader = new FBXLoader();
 fbxLoader.load(
   '/earth/source/Earth.fbx',
@@ -573,6 +611,20 @@ function handleGlobeClick(event) {
     setTerrainMetadata(isOcean === true ? 'Ocean · no ignition' : 'Surface unknown');
     return;
   }
+
+  // Phase 2: classify land cover for the crosswalk. Always runs (cheap,
+  // in-memory), even under the legacy engine — the info surfaces in the
+  // scenario-basis metadata so users can see what the phase1 engine
+  // will consume when it's turned on. Legacy sim math is unchanged.
+  const landCover = landCoverSource
+    ? landCoverSource.classifyAtLatLon(coordinates.latitude, coordinates.longitude)
+    : null;
+  const fuelDecision = crosswalkLandCoverToFuel(landCover);
+  lastLandCover = landCover;
+  lastFuelDecision = fuelDecision;
+  console.info('[landcover]',
+    landCover ? `${landCover.className} (WC ${landCover.classCode})` : 'no coverage',
+    `→ ${fuelDecision.fuelCode} (${fuelDecision.confidence})`);
 
   placeMarker(localHitPoint);
   startFireSimulation(coordinates);
@@ -819,7 +871,7 @@ function updateScenarioMetadata() {
   modelValue.textContent = `Cellular · ${SIMULATION_ENGINE} · ${MODEL_TIMESTEP_MINUTES} min/tick`;
   terrainValue.textContent = terrainMetadataStatus;
   elevationValue.textContent = formatElevationRange(terrainMetadataHeights);
-  fuelBasisValue.textContent = fuelLabel;
+  fuelBasisValue.textContent = formatFuelBasisLabel(fuelLabel);
   windBasisValue.textContent = `${windDirection}° · ${windSpeedInput.value} km/h`;
   moistureBasisValue.textContent = `${moistureInput.value}%`;
   slopeBasisValue.textContent = `${slopeInput.value}%`;
@@ -827,6 +879,17 @@ function updateScenarioMetadata() {
   seedValue.textContent = String(SIMULATION_SEED);
   metadataState.textContent = terrainMetadataStatus;
   guideScale.textContent = `${FIRE_FIELD_DIAMETER_KM} km field`;
+}
+
+// Composite the legacy sim's fuel selection with the Phase 2 WorldCover
+// crosswalk. Both are shown so a reader can tell which one the current
+// engine is using (legacy → the dropdown) and what the phase1 engine
+// will consume (the crosswalked fuel) once flipped.
+function formatFuelBasisLabel(legacyDropdownLabel) {
+  if (!lastFuelDecision) return legacyDropdownLabel;
+  const confidence = lastFuelDecision.confidence;
+  const wcName = lastLandCover?.className ?? 'unavailable';
+  return `${legacyDropdownLabel} · WC ${wcName} → ${lastFuelDecision.fuelCode} (${confidence})`;
 }
 
 function formatSignedMetric(value, unit) {

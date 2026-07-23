@@ -7,10 +7,15 @@
     "dev": "vite --host 127.0.0.1 --port 5174",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
-    "test": "node --test"
+    "test": "node --test",
+    "build:landcover": "node scripts/build-landcover-map.mjs"
   },
   "dependencies": {
     "three": "^0.167.1",
     "vite": "^5.4.19"
+  },
+  "devDependencies": {
+    "geotiff": "^3.0.5",
+    "pngjs": "^7.0.0"
   }
 }

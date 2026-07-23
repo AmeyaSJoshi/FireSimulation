@@ -1,0 +1,100 @@
+{
+  "source": "ESA WorldCover 2021 v200",
+  "attribution": "ESA / Zanaga et al., CC BY 4.0",
+  "builtAt": "2026-07-23T05:26:59.825Z",
+  "mosaic": {
+    "width": 10800,
+    "height": 5400,
+    "resolutionMetersApprox": 3710.6496296296295,
+    "projection": "equirectangular",
+    "latitudeRange": [
+      -90,
+      90
+    ],
+    "longitudeRange": [
+      -180,
+      180
+    ]
+  },
+  "paletteByRgb": {
+    "0,0,0": 0,
+    "0,100,0": 10,
+    "255,187,34": 20,
+    "255,255,76": 30,
+    "240,150,255": 40,
+    "250,0,0": 50,
+    "180,180,180": 60,
+    "240,240,240": 70,
+    "0,100,200": 80,
+    "0,150,160": 90,
+    "0,207,117": 95,
+    "250,230,160": 100
+  },
+  "classes": {
+    "0": {
+      "code": 0,
+      "name": "No data",
+      "burnable": false
+    },
+    "10": {
+      "code": 10,
+      "name": "Tree cover",
+      "burnable": true
+    },
+    "20": {
+      "code": 20,
+      "name": "Shrubland",
+      "burnable": true
+    },
+    "30": {
+      "code": 30,
+      "name": "Grassland",
+      "burnable": true
+    },
+    "40": {
+      "code": 40,
+      "name": "Cropland",
+      "burnable": true
+    },
+    "50": {
+      "code": 50,
+      "name": "Built-up",
+      "burnable": false
+    },
+    "60": {
+      "code": 60,
+      "name": "Bare / sparse",
+      "burnable": true
+    },
+    "70": {
+      "code": 70,
+      "name": "Snow and ice",
+      "burnable": false
+    },
+    "80": {
+      "code": 80,
+      "name": "Permanent water",
+      "burnable": false
+    },
+    "90": {
+      "code": 90,
+      "name": "Herbaceous wetland",
+      "burnable": true
+    },
+    "95": {
+      "code": 95,
+      "name": "Mangroves",
+      "burnable": true
+    },
+    "100": {
+      "code": 100,
+      "name": "Moss and lichen",
+      "burnable": true
+    }
+  },
+  "tileCounts": {
+    "ok": 2651,
+    "failed": 0,
+    "requested": 2651
+  }
+}
