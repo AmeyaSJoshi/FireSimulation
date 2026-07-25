@@ -5,8 +5,49 @@ on Earth and it fetches real land cover, terrain, and weather for that location,
 then propagates fire using published fire-science equations — not a game
 heuristic or a cellular-automaton approximation.
 
-**Status: research prototype.** Validated against 6 historical US fire
+**Status: research prototype.** Benchmarked against 9 historical US fire
 perimeters. Honest about what it cannot do (see *Known limitations*).
+
+---
+
+## ⚠️ Read this first if you are an AI agent
+
+**Accuracy today: ~0.27 IoU on free-burning fires** (recall 0.90–0.95, with a
+consistent ~2.5–3× area over-prediction). Operational models sit at 0.40–0.60.
+The headline blended figure is 0.0996 — see *Accuracy* for why the tiers matter.
+
+**These avenues are CLOSED. Do not re-attempt them without new information —
+each was investigated, measured, and logged.**
+
+| avenue | outcome | where |
+|---|---|---|
+| Suppression modelling | No reachable dated perimeter-progression source. Engine exists, data does not | RUN-019/019b |
+| Spotting / embers | Measured **harmful twice**, under opposite conditions (0.192→0.152 and 0.224→0.166). Module is sourced and correct; embers are not the constraint | RUN-021, RUN-023 |
+| Active-burn duration from weather | Already handled — `surfaceSpread.js` zeroes rate above moisture of extinction and the solver skips those windows | RUN-022 |
+| Global canopy bulk density | Not derivable — FCCS carries cover/height/crown-base but **no crown biomass load** | RUN-023 |
+| Terrain wind downscaling | No usable closed form. WindNinja's effect emerges from a full PDE solve; Jackson & Hunt needs hill geometry not in the pipeline; Ryan (1977) is diurnal slope wind, a different phenomenon | RUN-024 |
+| ML-fitted fuel crosswalk | Scoped, recommended **against**: too few fires, only 1–2 land-cover classes represented, and fitting would absorb the known ERA5 wind error into fuel parameters | RUN-024 era |
+| Finer weather (HRRR) | Zero coverage for 2014–2018 dates | RUN-016 |
+
+**The single biggest lesson, learned the hard way:** oregon-gulch-2014 scored
+0.239 and was celebrated as the project's best result. It was **compensating
+errors** — a spread rate ~5× too slow paired with a model window ~5× too long.
+Satellite data contradicted an input nobody had questioned. *A good score is not
+evidence of good physics.* Audit inputs, not just outputs.
+
+**What actually improved accuracy this session:** adding benchmark cases. No
+model change; measured accuracy went 0.19 → 0.27 because the old estimate rested
+on two fires. Measurement, not mechanism, was the binding constraint.
+
+**Known-suspect inputs still unaudited** (each could hide the same class of
+compensating error): synthetic bbox-centroid ignition points on 5 of 6 default
+cases; 2024-vintage LANDFIRE fuel applied to 2012–2018 fires; ERA5 wind averaged
+over ~31 km.
+
+**Current bottleneck:** spread *rate* is ~5× too slow on large fires. This is a
+rate deficit, not a missing mechanism — adding spread-producing mechanisms has
+been measured as counterproductive twice. Wind resolution is the leading
+suspect and is unresolved (see *Next step*).
 
 ---
 
