@@ -1,0 +1,21 @@
+{
+  "product": "LANDFIRE 2024 FBFM40 (LF2024_FBFM40_CONUS)",
+  "source": "USGS/USFS LANDFIRE program, public domain, no known usage restrictions",
+  "attribution": "LANDFIRE (LF2024), U.S. Geological Survey / U.S. Forest Service",
+  "requestUrl": "https://edcintl.cr.usgs.gov/geoserver/landfire_wcs/conus_2024/wcs?service=WCS&version=1.0.0&request=GetCoverage&coverage=LF2024_FBFM40_CONUS&crs=EPSG:4326&bbox=-105,39,-104.9,39.1&width=64&height=64&format=GeoTIFF",
+  "acquiredAt": "2026-07-24T00:00:00Z",
+  "acquisitionMethod": "Direct curl GET against the live CONUS WCS endpoint. Succeeded on 1 of 4 attempts in this session; the other 3 attempts failed with transport errors (empty reply / TLS reset), matching the previously logged HTTP 502 instability.",
+  "file": "lf2024-fbfm40-clear-creek-co-sample.tif",
+  "sha256": "9992dae016e72d0309fd5d42cf11f8332059e7eb7375139025de33b853ecabc8",
+  "byteLength": 8596,
+  "requestedBbox": [-105, 39, -104.9, 39.1],
+  "requestedWidthPx": 64,
+  "requestedHeightPx": 64,
+  "returnedImageBoundingBox": [-105.01231390848751, 38.992833452981834, -104.8878377441683, 39.107157691760655],
+  "returnedResolutionDegrees": [0.0019449400674877992, 0.0017863162309190717],
+  "coordinateReferenceSystem": "EPSG:4326",
+  "pixelIsArea": true,
+  "approximateAreaDescription": "Small rural bbox near Clear Creek County, Colorado, chosen only because it lies inside CONUS coverage and is a low-risk arbitrary test AOI, not because it relates to any benchmark fire",
+  "accuracyClaim": false,
+  "resolvedValidationGap": "Originally, this real response's returned bbox differed from the requested bbox by more (~0.007-0.012 deg) than validateLandfireFuelRasterGeometry's strict-equality tolerance, and its resolution reported a positive y-component (geotiff.js's ModelTransformation sign convention) where the validator required negative. Both were traced to real causes, not tolerance tuning: (1) live GeoServer WCS 1.0.0 legitimately pads/resamples the returned extent to its native grid rather than matching the request exactly -- confirmed across 4 independently-fetched real samples at different locations/sizes, resolution up to ~1.6x coarser per axis, width/height always exact; (2) geotiff.js reports OPPOSITE resolution-y signs for ModelPixelScale- vs ModelTransformation-encoded GeoTIFFs (see node_modules/geotiff/dist-node/geotiffimage.js getResolution()), so sign is not a reliable orientation signal across encodings. validateLandfireFuelRasterGeometry was changed to a containment + magnitude-based check (see src/lib/landfireFuel.js and its tests). All 4 real samples now pass; full test suite and offline validators still pass."
+}

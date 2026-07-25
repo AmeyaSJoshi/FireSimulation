@@ -17,14 +17,16 @@ const classCatalog = {
   0:  { code: 0,  name: 'No data',       burnable: false },
   10: { code: 10, name: 'Tree cover',    burnable: true  },
   30: { code: 30, name: 'Grassland',     burnable: true  },
-  50: { code: 50, name: 'Built-up',      burnable: false }
+  50: { code: 50, name: 'Built-up',      burnable: false },
+  80: { code: 80, name: 'Permanent water', burnable: false }
 };
 
 const paletteByRgb = {
   '0,0,0':       0,
   '0,100,0':     10,
   '255,255,76':  30,
-  '250,0,0':     50
+  '250,0,0':     50,
+  '0,100,200':   80
 };
 
 test('latLonToMosaicPixel: (0, 0) maps to the mosaic center', () => {
@@ -119,6 +121,22 @@ test('createLandCoverSource: returns null for out-of-coverage pixels (transparen
   });
   const result = source.classifyAtLatLon(20, 30);
   assert.equal(result, null);
+});
+
+test('createLandCoverSource: exposes permanent water as a hard water mask', async () => {
+  const reader = { readPixel: () => [0, 100, 200, 255] };
+  const source = await createLandCoverSource({
+    imageReader: async () => reader,
+    meta: {
+      source: 'test',
+      mosaic: mosaicMeta,
+      paletteByRgb,
+      classes: classCatalog
+    }
+  });
+
+  assert.equal(source.isWaterAtLatLon(20, 30), true);
+  assert.equal(source.classifyAtLatLon(20, 30).classCode, 80);
 });
 
 test('createLandCoverSource: reports which points it can never classify (invalid lat/lon)', async () => {

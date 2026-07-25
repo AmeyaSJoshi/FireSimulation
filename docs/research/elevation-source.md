@@ -75,3 +75,14 @@ Terrain should be non-blocking for firing:
 **Primary:** Open-Meteo Elevation API, direct browser GET, no key, global GLO-90, about 90 m resolution, CORS verified.
 
 **Fallback:** cached elevation, then clearly labeled flat/unknown terrain; use Open Topo Data only through a proxy or self-hosted deployment because its current public endpoint is not browser-CORS compatible.
+
+## Fire-field sampling implementation
+
+The simulator's 32 km interactive field uses a 32 × 32 sample lattice rather
+than a single 10 × 10 request. Because the public endpoint accepts at most 100
+locations per request, the 1,024 points are sent as 11 bounded batches and
+reassembled in raster order before interpolation onto the 64 × 64 fire grid.
+This improves the effective terrain spacing from approximately 3.5 km to
+approximately 1 km without requiring credentials or a paid service. The
+source's nominal 90 m resolution should not be confused with the sampled
+field's 1 km spacing or with bare-earth accuracy.

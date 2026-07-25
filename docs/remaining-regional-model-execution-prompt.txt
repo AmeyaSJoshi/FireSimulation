@@ -1,0 +1,708 @@
+CLAUDE CODE EXECUTION PROMPT: REMAINING REGIONAL FIRE MODEL WORK
+================================================================
+
+Date: 2026-07-24
+Workspace: /Users/ameyajoshi/Claude Projects/Fire Simulation
+Audience: Claude Code or another autonomous coding agent
+Mission: finish the strongest defensible CONUS regional fire-spread model that can be demonstrated at a hackathon without paid services, while being exact about what is and is not validated.
+
+This is an execution prompt. Work in the repository and leave tested code and durable evidence. Do not stop at a plan, a list of possible improvements, or a visual demo.
+
+1. READ FIRST, THEN FREEZE THE BASELINE
+----------------------------------------
+
+Read these files before changing code:
+
+- docs/codex-handoff-to-claude.md
+- docs/handoff-status.md
+- docs/realistic-fire-model-claude-code-prompt.txt
+- package.json
+- src/lib/surfaceSpread.js
+- src/lib/firePropagation.js
+- src/lib/fireFieldInputs.js
+- src/lib/landCoverToFuel.js
+- src/lib/landfireFuel.js
+- src/lib/waterAuthority.js
+- src/lib/simulationLifecycle.js
+- src/lib/hackathonBenchmarkRunner.js
+- src/lib/historicalPerimeterFixtures.js
+- src/lib/perimeterValidation.js
+- scripts/validate-hackathon-benchmarks.mjs
+- scripts/validate-historical-progression.mjs
+- src/main.js
+
+Inspect the working tree and preserve existing user/Claude changes. Do not reset, delete, or replace the current model wholesale. Keep the existing worker path, click-to-ignite workflow, water protections, finite lifecycle, Scenario Lab, replay, provenance UI, and educational disclaimer.
+
+Before implementation, create a durable run record under docs/regional-model-run/ with:
+
+- THREAD.md: objective, current date, starting commit/working-tree state, and decisions.
+- BASELINE.md: exact commands, versions, and complete pass/fail output summaries.
+- APPROACH-REGISTRY.md: every attempted approach, changed files, result, and accept/reject decision.
+- RESULTS.jsonl: append-only machine-readable result records.
+- REJECTED.md: approaches that were tried and rejected, with evidence and reason.
+
+Never edit old result records to make a later result look better. Append a new record with a new model/data manifest.
+
+2. CURRENT STATE AND HONEST STARTING CLAIM
+------------------------------------------
+
+The repository currently has:
+
+- A deterministic SI-boundary Rothermel-style surface kernel.
+- Directional fire-ellipse rates and priority-queue arrival-time propagation.
+- Terrain, weather, fuel moisture, canopy, finite persistence, burnout/lifecycle, and a finite interactive horizon.
+- Explicit ocean/lake/river/non-burnable barriers and adversarial water tests.
+- Global FCCS/WorldCover fallback inputs.
+- LANDFIRE 2024 FBFM40 mapping and a bounded WCS route intended for CONUS.
+- Historical replay and a two-case hackathon benchmark runner.
+- Seeded uncertainty ranges, currently not calibrated probabilities.
+
+Existing evidence includes 335 passing tests, a passing build, published Rothermel/WAF/convergence checks, and a two-case benchmark with mean IoU about 0.4886 and mean F1 about 0.6480. The benchmark is diagnostic only: it uses two California cases and does not prove regional accuracy. Rush Creek replay remains a serious warning, with final IoU about 0.0661 and strong underprediction of observed growth.
+
+The live LANDFIRE WCS request has recently returned transport failures (HTTP 502 / empty reply; the related public canopy route also failed with SSL transport errors). The mapping code and tests do not prove that live regional cells are arriving. Treat this as an unresolved data-acquisition problem, not as evidence that LANDFIRE data are absent or that regional accuracy is complete.
+
+The starting claim is therefore:
+
+"The application has a tested, deterministic surface-fire foundation and an implemented regional FBFM40 adapter, but its live regional data path and multi-fire predictive accuracy are not yet proven."
+
+Do not weaken this statement until the gates below are met.
+
+3. NON-NEGOTIABLE TRUTH AND SAFETY RULES
+-----------------------------------------
+
+- Do not call this an operational tool, emergency system, forecast, or validated real-time predictor.
+- Do not claim "accurate," "high confidence," "works anywhere in the United States," or "regional LANDFIRE model" from unit tests, visual plausibility, equation agreement, or the current two-case score.
+- Do not add a neural network, LLM, opaque learned correction, arbitrary global speed multiplier, or hidden fuel multiplier. A learned model is out of scope until there is a frozen, large, provenance-complete labeled dataset and strict geographic/time holdouts.
+- Never turn missing external data into plausible-looking burnable values without visible fallback metadata and a lower evidence tier.
+- Never label a run regional/active unless valid direct FBFM40 cells arrived, passed dimension/bounds/orientation/nodata validation, and meet a declared valid-cell coverage threshold.
+- Do not tune and evaluate on the same fires.
+- Do not modify an evaluator, metric definition, perimeter geometry, validation mask, timestep, or fixture solely to improve scores.
+- Do not infer suppression from a stalled observed perimeter and call the result natural fire behavior.
+- Do not label ensemble quantiles as probabilities until coverage has been tested against held-out fires.
+- Preserve zero-crossing water barriers, non-burnable barriers, finite termination, deterministic seeds, and provenance metadata.
+- Any approximation must be named in code, docs, UI metadata, and tests.
+
+4. DEFINITION OF DONE
+----------------------
+
+The work is complete only when all applicable gates pass and the final report lists every remaining failure. A feature can be marked experimental when its production gate is not met, but it cannot be presented as complete.
+
+Required completion gates:
+
+A. Regional input contract
+
+- A deterministic mocked integration test proves a valid asymmetric FBFM40 raster travels from response parsing through grid alignment, per-cell fuel selection, propagation, metrics, and provenance.
+- Tests cover raw code mapping, nodata, malformed/empty payloads, HTTP failures, timeout/retry budget, response dimensions, requested bounds, CRS/geotransform assumptions, pixel orientation, north/south row order, and resampling.
+- An asymmetric sentinel raster proves that values do not appear in mirrored, transposed, or vertically flipped cells.
+- Live transport is probed when available, but a live failure produces an explicit fallback/unavailable state. It is never hidden.
+- Valid-cell fraction, source URL, product/version, acquisition timestamp, resolution, bbox, hash/cache identity, fallback reason, and model-definition version are recorded.
+
+B. Physical invariants
+
+- Existing Rothermel, independent-rate, WAF, convergence, water, lifecycle, and determinism validators continue to pass.
+- Water and non-burnable cells always have zero spread and no directed path crosses a water edge, including diagonal, sub-cell, coastal, river, and lake cases.
+- Fire reaches a finite terminal state. Burnout must be more than only a rendering effect; either enforce source energy/residence constraints in propagation or document and test the exact front-arrival approximation without calling it a complete consumption model.
+- Weather validity is explicit. A historical weather timeline must not silently persist its final observation forever. Post-window behavior must be blocked, flagged, or use a documented forecast policy.
+- Same inputs, model version, source manifest, and seed produce repeatable results.
+
+C. Multi-fire evaluation
+
+- Preserve the existing two-case baseline.
+- Expand to at least six independent U.S. fires for the hackathon track; eight or more is preferred if reliable public inputs can be frozen.
+- Stratify cases across regions and regimes: at minimum grass, shrub, timber/mixed fuel, steep terrain, flat terrain, and a water-adjacent/coastal case. Include a geographically or temporally held-out region/year.
+- Freeze ignition coordinates/time, observation times, perimeters, weather source and window, terrain source, fuel source, grid/resolution, suppression assumptions, random seed, and model version.
+- Use a calibration set and an untouched holdout set. Prefer four calibration fires plus two or more holdouts. Never rank parameters on holdouts.
+- Report per fire and aggregate: IoU, F1, precision, recall, predicted/observed area ratio, centroid error, boundary distance/error, arrival/timing error when available, field-boundary truncation, termination reason, and all input provenance.
+- Report worst case and medians, not only means.
+
+D. Calibration discipline
+
+- Calibrate only interpretable, source-supported quantities: moisture initialization/lag, fuel availability within defensible bounds, wind adjustment/shelter, live-fuel parameters, ignition uncertainty, and spotting parameters after spotting exists.
+- Keep Rothermel constants, water barriers, evaluator definitions, and numerical timestep out of calibration.
+- Every trial has a complete manifest containing parameters, seed, source hashes, code/model version, split, metrics, and status.
+- Accept a default change only when aggregate holdout performance is no worse than the frozen baseline, median per-fire IoU improves meaningfully, no holdout regresses materially, and no critical regime fails. If evidence is weaker, keep it experimental.
+
+E. Product honesty
+
+- UI and reports show the actual active fuel source, fallback state, coverage, resolution, weather provenance/validity, terrain provenance, moisture basis, model version, seed, uncertainty basis, and benchmark status.
+- Uncalibrated ranges say "scenario range" or equivalent, not probability/confidence interval.
+- The app retains a clear educational disclaimer and a visible distinction between active regional inputs, fallback inputs, and exploratory global behavior.
+
+5. EXECUTION ORDER
+------------------
+
+Do the following in order. Re-run focused tests after each milestone and record outputs in docs/regional-model-run/.
+
+PHASE 1: Freeze and audit
+
+Run and record at least:
+
+    npm test
+    npm run build
+    npm run validate:rothermel
+    npm run validate:rothermel:rate
+    npm run validate:waf
+    npm run validate:convergence
+    npm run validate:global-fuelbed
+    npm run validate:hackathon
+    npm run validate:progression:fine-hindcast:global
+    git diff --check
+
+Read the benchmark implementation and prove which sources it actually uses. Add a failing test for any claim the code currently makes but cannot prove.
+
+PHASE 2: Make the regional input path trustworthy
+
+Focus first on `src/lib/landfireFuel.js`, `vite.config.js`, `src/lib/fireFieldInputs.js`, `src/lib/landCoverToFuel.js`, `src/main.js`, and their tests.
+
+- Diagnose the WCS failure as transport, server response, coverage name, bounds, or parsing. Do not conflate these.
+- Add bounded timeout/retry behavior and explicit route states: regional-active, fallback, and unavailable.
+- Validate the FBFM40 product's own geographic bounds, not an unrelated canopy-layer bound.
+- Validate GeoTIFF dimensions, CRS/assumptions, transform, requested bbox, resolution, nodata, orientation, and sampling.
+- If live WCS remains unreliable, add a free official cached/downloaded sample or fixture path suitable for the hackathon. Record URL, acquisition date, checksum, bbox, resolution, license/attribution, and how it enters the same parser. Do not bundle a made-up raster.
+- Keep the live path and offline fixture path separate in provenance.
+- Ensure direct regional codes override coarse crosswalks only on validated land cells; water remains authoritative.
+- Require a meaningful valid-cell coverage threshold before regional evidence is promoted. One valid cell is not enough.
+- Test that a regional center cell can block ignition when it is water/non-burnable and that all per-cell codes reach the worker correctly.
+
+PHASE 3: Harden the lifecycle and time contracts
+
+Inspect `src/lib/firePropagation.js`, weather timeline helpers, `simulationLifecycle.js`, and related tests.
+
+- Tie burnout/residence to the actual cell fuel/moisture/available energy when the model claims fuel consumption.
+- If the solver is intentionally an arrival approximation, name that limitation explicitly and prevent UI/docs from implying a complete combustion budget.
+- Add an explicit weather-validity horizon and deterministic tests for behavior after the last historical observation.
+- Preserve finite persistence expiry, finite 72-hour interactive horizon, no reignition without a new ember source, and no spread through zero-rate intervals.
+
+PHASE 4: Build a frozen regional benchmark suite
+
+Extend the existing benchmark machinery rather than creating a parallel evaluator. Keep benchmark code independent of renderer code.
+
+- Add a versioned manifest with case metadata, sources, hashes, ignition uncertainty, observation windows, grid/resolution, and calibration/holdout role.
+- Use only public, free data that can be legally and repeatably identified. Do not make live network availability a hidden requirement for the evaluator.
+- Add an explicit data-quality status per field: measured, modeled, estimated, fallback, unavailable.
+- Keep natural-spread, documented-containment, and observed-perimeter-assimilation modes separate.
+- Add boundary and rasterization sensitivity checks so IoU is not interpreted without its grid context.
+- Add an ignition-location sensitivity sweep for cases with uncertain ignition coordinates.
+
+PHASE 4.5: Make evaluation one-command and offline-reproducible
+
+- Add or document one command that runs the frozen offline evaluation without requiring a live upstream service.
+- Bundle or reference only official, free, hash-verified fixtures. The bundle must include source URLs, acquisition dates, checksums, bboxes, resolutions, licenses/attribution, environment/runtime versions, model version, evaluator version, and deterministic seeds.
+- The evaluator and metric definitions are locked inputs. A benchmark run must fail closed when a required regional fixture is missing rather than substituting an unreported default.
+- Keep live acquisition smoke tests separate from offline benchmark results. A live WCS outage must not make the offline evaluator nondeterministic.
+- Add an end-to-end product acceptance test that covers: user land click, regional-data success or honest fallback, aligned field construction, worker simulation, water/lifecycle behavior, visible provenance, deterministic metrics, and browser regression under both network-success and network-failure fixtures.
+
+PHASE 5: Calibrate, then add mechanisms only when evidence supports them
+
+Start with interpretable parameters and a train/holdout split. Preserve all trials, including rejected ones.
+
+Potential high-value mechanisms, in this order:
+
+1. Better regional fuel reliability and resolution.
+2. Better historical weather validity and local wind adjustment.
+3. Explicit ignition-location uncertainty.
+4. Explicit spotting module, only as a separate seeded mechanism.
+5. Explicit time-aware suppression/containment inputs.
+6. Crown-fire coupling only after the surface model, fuel, weather, and spotting evidence is stable.
+
+For spotting, require wind-vector transport, a finite ember-distance/lifetime distribution, deterministic seed, destination fuel/moisture/land validation, water rejection, downwind-bias tests, and separate attribution in metrics. Never simulate spotting by multiplying surface spread.
+
+For suppression, require explicit user/replay inputs such as containment lines, retardant zones, or time-varying barriers. Do not infer them from observed perimeter shape in the default model.
+
+Bounded ownership rule for parallel work:
+
+- Regional transport/parser agent: `src/lib/landfireFuel.js`, `vite.config.js`, and focused tests only.
+- Benchmark agent: fixture manifests, benchmark runner, metric/report code, and focused tests only.
+- Lifecycle agent: propagation/weather/lifecycle modules and focused tests only.
+- Product/provenance agent: `src/main.js`, scenario evidence, UI copy, browser acceptance tests, and docs only.
+- One integrator owns calibration, evaluator changes, default changes, and final verification. Do not let parallel agents edit the same file or tune against moving benchmarks.
+
+6. ADVERSARIAL REVIEW CHECKLIST
+-------------------------------
+
+Before declaring any milestone complete, try to falsify it:
+
+- Does a valid-looking LANDFIRE response get transposed or flipped?
+- Does a partial regional field incorrectly promote the whole run to regional-active?
+- Does a network failure silently turn into burnable default fuel?
+- Can a diagonal or sub-cell water strip be crossed?
+- Can post-window weather persist forever?
+- Can a burned cell reignite without a new ember source?
+- Does a finite horizon hide an active front that should have terminated?
+- Does a calibration change improve one fire while degrading a different fuel family?
+- Did any tuning use a holdout fire, observed perimeter, suppression assumption, or evaluator change improperly?
+- Is a score improvement caused by field-boundary truncation, raster resolution, ignition centering, or metric changes?
+- Can another run reproduce the exact result from the frozen manifest and seed?
+- Does a clean/offline run produce the same result without access to LANDFIRE or weather services?
+- Does the browser tell the truth when the regional request succeeds, partially succeeds, times out, or falls back?
+
+If any answer is yes, fix it or label the capability blocked/experimental. Do not paper over it with UI copy.
+
+7. REPORTING CONTRACT
+---------------------
+
+At the end, produce or update:
+
+- docs/regional-model-run/RESULTS.md
+- docs/regional-model-run/RESULTS.jsonl
+- docs/regional-model-run/APPROACH-REGISTRY.md
+- docs/handoff-status.md
+
+The final report must contain:
+
+- Changed files grouped by subsystem.
+- Exact commands and pass/fail results.
+- Per-case and aggregate benchmark table, including worst cases.
+- Calibration/holdout separation and rejected trials.
+- Active data sources, versions, resolutions, hashes, and fallback states.
+- Exact LANDFIRE live transport result, if tested.
+- One-command offline evaluation command, environment, input hashes, and evaluator/model manifests.
+- Model parameters and deterministic seeds.
+- Water, termination, weather-validity, and reproducibility evidence.
+- Browser acceptance evidence for both regional-success and regional-fallback paths.
+- Remaining accuracy gaps and blocked inputs.
+- A plain-language confidence statement distinguishing: working software, equation-checked, input-validated, benchmarked, and not yet trustworthy for operational prediction.
+
+Do not write "done" if a required gate is missing. Write the precise blocker and the best evidence-backed fallback.
+
+8. RETURN CONDITION
+-------------------
+
+Continue until either:
+
+1. The required regional, benchmark, lifecycle, provenance, and verification gates pass; or
+2. An external dependency genuinely blocks progress after deterministic local tests, offline fixtures, and documented fallbacks have been exhausted.
+
+In case 2, leave the project in its best tested state, keep the blocked capability visibly labeled, and report the exact reproduction command and external dependency. A plan alone is not a completion.
+
+The hackathon target is a robust, honest CONUS demonstration with inspectable physics and reproducible evidence, not a claim of universal wildfire accuracy.
+
+9. CODEX PROGRESS UPDATE AT LOW-BUDGET CHECKPOINT
+--------------------------------------------------
+
+Date: 2026-07-24
+Agent: Codex
+
+Completed in this run:
+
+- Created durable run records under `docs/regional-model-run/`: `THREAD.md`, `BASELINE.md`, `APPROACH-REGISTRY.md`, `RESULTS.jsonl`, `REJECTED.md`, and `benchmark-manifest.json`.
+- Hardened the LANDFIRE 2024 FBFM40 contract. Fuel requests now use product-specific CONUS bounds, require at least 95% valid cells, validate GeoTIFF dimensions, EPSG:4326, pixel-is-area metadata, requested bounds, resolution, and north-up orientation, and expose coverage/model-count/geometry provenance.
+- Added explicit fail-closed behavior for partial or out-of-coverage regional fields. A live CONUS WCS probe was attempted and returned HTTP 502 with upstream `curl: (52) Empty reply from server`; no fabricated raster was used. An out-of-coverage probe returns `available:false` with `reason:outside_conus_coverage`.
+- Added an asymmetric offline GeoTIFF fixture that decodes raw FBFM40 values, checks geometry and row-major orientation, aligns direct per-cell regional codes, runs the arrival solver, advances lifecycle state, and emits metrics/provenance. Its output explicitly sets `accuracyClaim:false`.
+- Added `npm run validate:regional-offline`, a network-independent one-command suite combining the regional contract fixture and the existing two-case diagnostic benchmark.
+- Split the existing benchmark into calibration and holdout roles. Calibration is restricted to Reservoir; Deer is evaluated untouched. The benchmark manifest now states that both cases use homogeneous TU2, flat terrain, calm synthetic weather, and are diagnostic only.
+- Added explicit historical weather validity. Multi-entry timelines stop new spread strictly after the final observation and expose `weatherTimelineEndMinutes` plus `weatherPostWindowPolicy:'block'`. One-entry snapshot timelines remain usable. Propagation tests cover finite positive windows and post-window blocking.
+
+Verification completed:
+
+- `npm test`: 339 pass, 0 fail.
+- `npm run build`: pass; only the existing Vite large-chunk warning remains.
+- `npm run validate:regional-inputs`: pass; 16/16 valid cells, direct FBFM40 field, finite neighbor arrival 1565.641377 minutes, lifecycle footprint 16 cells.
+- `npm run validate:regional-offline`: pass without network access.
+- `npm run validate:hackathon`: pass; two-case diagnostic mean IoU 0.4885983866 and mean F1 0.6479858176.
+- `npm run calibrate:hackathon`: pass, but the 48-trial sweep remains diagnostic only; best calibration is Reservoir-only and the holdout is still one Deer case.
+- Browser smoke test on `http://127.0.0.1:5188/`: page rendered, water click was rejected as `Water surface · no ignition`, Oklahoma land click started the worker path, regional LANDFIRE fallback was shown honestly, and the run reached a finite 72-hour horizon. No browser console errors were observed. Full browser acceptance under controlled regional-success/failure fixtures is still not implemented.
+
+Still required before claiming the definition of done:
+
+- Freeze and integrate at least six independent public U.S. fires with four-or-more calibration cases and two-or-more geographic/time holdouts. The current two California fixtures are not enough and do not use live regional fuel/weather/terrain.
+- Acquire or bundle a real official LANDFIRE sample with URL, acquisition date, checksum, license/attribution, and the same parser path. The synthetic fixture is contract evidence only.
+- Resolve or document the archived Open-Meteo DNS/transport blocker before treating Rush Creek historical progression as validated.
+- Add controlled browser acceptance fixtures for regional success, partial/timeout failure, provenance visibility, worker metrics, water/lifecycle behavior, and deterministic replay.
+- Keep the product claim at: tested fire-spread software with equation checks and an implemented regional adapter; not operationally accurate or validated for universal U.S. prediction.
+
+Recommended resume commands:
+
+    npm run validate:regional-offline
+    npm test
+    npm run build
+    npm run validate:progression:fine-hindcast:global
+
+Do not overwrite this progress section. Append later run records and a new dated progress section.
+
+10. CODEX PROGRESS UPDATE AFTER SIX-CASE BENCHMARK EXPANSION
+-------------------------------------------------------------
+
+Date: 2026-07-24
+Agent: Codex
+
+Completed since the previous checkpoint:
+
+- Frozen four additional public ArcGIS perimeter snapshots in
+  `src/lib/officialBenchmarkFixtures.js`: Oregon Gulch 2014, Big Five 2015,
+  Dinely 2017, and Stoll 2018. Each has a documented query URL, source-response
+  SHA-256, decoded geometry SHA-256, reported acres, dates, bbox, split,
+  resolution, and explicit input-quality flags.
+- Expanded `HACKATHON_BENCHMARK_DEFINITIONS` to six cases: four calibration
+  cases (`reservoir-2016`, `oregon-gulch-2014`, `big-five-2015`, `stoll-2018`)
+  and two holdouts (`deer-2016`, `dinely-2017`). Case-specific grid sizes and
+  cell sizes are now used throughout rasterization, propagation, and metrics.
+- Normalized the Oregon ArcGIS record's same-winding disjoint rings to a
+  `MultiPolygon` before passing it to the shared GeoJSON rasterizer. A test
+  catches the prior zero-observed-area failure mode.
+- Updated the benchmark manifest, run registry, JSONL evidence, baseline,
+  thread log, and handoff status. The benchmark remains explicitly
+  `diagnostic-only`; no accuracy claim was promoted.
+
+Verification after this expansion:
+
+- `node --test src/lib/hackathonBenchmarkRunner.test.js`: 4 pass, 0 fail.
+- `npm run validate:hackathon`: pass; 6 cases, 4 calibration, 2 holdout;
+  default mean IoU 0.3084645982, mean F1 0.4406033446, worst-case Oregon
+  Gulch IoU 0.0443956044.
+- `npm run calibrate:hackathon`: pass; 48 trials restricted to calibration
+  cases. Best calibration mean IoU 0.2646924070. Untouched holdout check:
+  mean IoU 0.3758546832, with Deer 0.5907626208 and Dinely 0.1609467456.
+- `npm run validate:regional-offline`: pass without network access.
+
+Interpretation and remaining blockers:
+
+- This fixes the evaluator's six-case shape and makes the public perimeter
+  evidence reproducible, but it does not make the fire model regionally
+  accurate. Every case still uses homogeneous TU2, flat synthetic terrain,
+  calm synthetic weather, no suppression or spotting, and estimated ignition
+  for the new fixtures. The Oregon case is especially informative because the
+  homogeneous model underpredicts its final area.
+- The live CONUS LANDFIRE WCS probe remains blocked by upstream HTTP 502 / empty
+  response. No live regional raster is fabricated from that failure.
+- Required next work remains: bundle and validate an official LANDFIRE sample
+  through the real parser, obtain archived weather/hindcast inputs, wire
+  heterogeneous fuel/terrain/wind/moisture fields into the benchmark, add
+  controlled browser success/failure fixtures, and validate suppression,
+  spotting, ignition uncertainty, lifecycle termination, and replay before
+  discussing operational accuracy.
+
+Do not overwrite this section. Append a later dated update with exact commands
+and results after the next milestone.
+
+11. CLAUDE VERIFICATION + REAL LANDFIRE SAMPLE UPDATE
+-------------------------------------------------------
+
+Date: 2026-07-24
+Agent: Claude Code
+
+Step 1 -- Verification only (no code changes):
+
+Re-ran every command from section 10's "Recommended resume commands" plus the
+full validator list from section 5, Phase 1. Every number reproduced exactly:
+
+    npm test                        -> 340/340 pass (before this run's addition)
+    npm run build                   -> pass, only the known Vite chunk-size warning
+    npm run validate:rothermel      -> pass
+    npm run validate:rothermel:rate -> pass
+    npm run validate:waf            -> pass
+    npm run validate:convergence    -> pass
+    npm run validate:global-fuelbed -> pass
+    npm run validate:regional-inputs   -> pass, accuracyClaim:false
+    npm run validate:regional-offline  -> pass, no network access
+    npm run validate:hackathon      -> pass, 6 cases, meanIoU 0.30846459816160016,
+                                        worst case oregon-gulch-2014 IoU 0.044395604395604395
+                                        (bit-for-bit identical to section 10's log)
+    git diff --check                -> clean
+
+No discrepancies found. The honest-claim framing in sections 9-10 is accurate.
+
+Step 2 -- Real LANDFIRE sample fixture (smallest bounded remaining blocker):
+
+Tested the live CONUS WCS endpoint directly with curl. It is NOT permanently
+down: 1 of 4 attempts in this session returned HTTP 200 with a valid 64x64
+GeoTIFF (8596 bytes); the other 3 failed with transport errors (empty reply /
+TLS reset). This matches the previously logged HTTP 502 instability -- the
+endpoint is real and occasionally reachable, just unreliable.
+
+Bundled that successful response as an official offline sample:
+
+    public/fixtures/landfire/lf2024-fbfm40-clear-creek-co-sample.tif
+    public/fixtures/landfire/lf2024-fbfm40-clear-creek-co-sample.manifest.json
+
+The manifest records request URL, acquisition date, sha256, byte length,
+requested vs. returned bbox/resolution, CRS, pixelIsArea, and license
+(LANDFIRE/USGS/USFS, public domain).
+
+Added a new test in `src/lib/landfireFuel.test.js` ("decodes a real,
+once-successfully-fetched LANDFIRE FBFM40 GeoTIFF sample") that reads this
+fixture, decodes it via `geotiff`, and runs it through the real
+`normalizeLandfireFuelRaster` / `summarizeLandfireFuelRaster` functions. It
+confirms: EPSG:4326, pixelIsArea true, 23 distinct FBFM40 codes, and
+validCellFraction 1.0 (>= the 0.95 gate).
+
+NEW FINDING -- a real, previously undetected gate failure:
+
+`validateLandfireFuelRasterGeometry(...)` throws `"GeoTIFF bounds do not
+match the requested bbox"` on this real, successfully-decoded raster. The
+live GeoServer WCS response's output bbox differs from the requested bbox by
+more (~0.007-0.012 deg) than the function's current resolution-based
+tolerance (~0.0023 deg). This was never observed before because every prior
+live request returned HTTP 502 -- decode, CRS, orientation, and pixelIsArea
+all pass; only the strict bbox-match check fails.
+
+This was deliberately NOT fixed in this run. Widening the tolerance without
+first understanding why GeoServer snaps/resamples the output extent would
+risk silently accepting a misaligned raster, which section 3's rules
+explicitly forbid ("Never turn missing external data into plausible-looking
+burnable values"; the same caution applies to loosening a geometry gate).
+Instead, the current throw is locked in as a passing `assert.throws`
+regression test, so this is now a visible, reproducible blocker rather than
+a silent gap.
+
+Verification after this change:
+
+    node --test src/lib/landfireFuel.test.js  -> 7/7 pass
+    npm test                                   -> 341/341 pass
+    npm run build                              -> pass
+
+Full evidence: `docs/regional-model-run/RESULTS.jsonl` (RUN-007),
+`docs/regional-model-run/APPROACH-REGISTRY.md` (RUN-007),
+`docs/regional-model-run/THREAD.md` (2026-07-24 update).
+
+Recommended next step for whoever picks this up: capture 2-3 more real live
+WCS samples at different bbox sizes, characterize exactly how GeoServer's
+output extent relates to the requested extent (grid-snapping vs. reprojection
+rounding vs. something else), then either widen
+`validateLandfireFuelRasterGeometry`'s tolerance with that evidence or change
+the request strategy (e.g. requesting a slightly larger bbox and clipping
+client-side) so live regional data can pass the existing gate without
+weakening it blindly.
+
+Do not overwrite this section. Append a later dated update with exact
+commands and results after the next milestone.
+
+12. CLAUDE FOLLOW-UP -- ROOT-CAUSED AND FIXED THE GEOMETRY GATE
+-------------------------------------------------------------------
+
+Date: 2026-07-24 (same day, later in session)
+Agent: Claude Code
+
+Section 11 documented a real live LANDFIRE response being rejected by
+`validateLandfireFuelRasterGeometry`, deliberately left unfixed pending
+more evidence. This section reports that fix.
+
+Followed systematic root-cause debugging rather than loosening the
+tolerance blindly: fetched 3 MORE real samples from the live WCS endpoint
+at different CONUS locations and request sizes (bbox -105,39/-104.9,39.1
+width 64; -120,37/-119.9,37.1 width 64; -110,35/-109.5,35.5 width 128;
+-95,32/-94.95,32.05 width 32). All 4 real samples (including the one from
+section 11) showed the SAME two real causes:
+
+1. Live GeoServer WCS 1.0.0 legitimately pads/resamples the returned
+   extent to its native grid rather than matching the request exactly.
+   Resolution came back up to ~1.6x coarser than requested per axis;
+   width/height in pixels were always honored exactly.
+
+2. `geotiff.js` (this project's exact installed version, see
+   node_modules/geotiff/dist-node/geotiffimage.js `getResolution()`)
+   returns a NEGATIVE y-resolution for GeoTIFFs encoded with
+   ModelPixelScale, but a POSITIVE y-resolution for GeoTIFFs encoded with
+   ModelTransformation -- for the SAME physical north-up orientation. The
+   synthetic contract fixture in `scripts/validate-regional-inputs.mjs`
+   uses ModelPixelScale (matches the old check by construction). GeoServer's
+   real WCS output uses ModelTransformation. The old
+   `resolutionY >= 0 -> throw` check therefore would have rejected EVERY
+   live LANDFIRE response forever, independent of the bbox issue.
+
+Fix applied in `src/lib/landfireFuel.js`
+(`validateLandfireFuelRasterGeometry`):
+
+    - bbox check changed from near-equality to containment: the returned
+      raster must fully cover the requested extent (half-pixel edge
+      epsilon for float rounding), which is what real WCS padding produces.
+    - resolution check changed from signed match to magnitude-only match,
+      bounded by a new `LANDFIRE_FUEL_MAX_RESOLUTION_RATIO = 4` constant
+      (about 2.5x margin over the worst observed real ratio of 1.6x), so a
+      wildly wrong/misaligned response (wrong coverage, wrong product) is
+      still rejected.
+    - Row-order/transposition protection is NOT done via resolution sign
+      anymore (proven unreliable across encodings). It remains covered by
+      the existing pixel-value-level asymmetric fixture in
+      `scripts/validate-regional-inputs.mjs`, which this change does not
+      touch.
+
+Updated tests: `src/lib/landfireFuel.test.js` ("rejects a regional raster
+with wrong CRS, non-covering bounds, or unusable resolution" rewritten;
+the real-sample test now asserts the geometry check PASSES instead of
+documenting the old throw; added a new test for a wildly wrong-location
+response to prove the containment check still rejects real problems).
+`scripts/validate-regional-inputs.mjs` updated to expect
+`resolution: [0.25, 0.25]` (magnitude) instead of `[0.25, -0.25]` (signed).
+
+Verification:
+
+    npm test                              -> 342/342 pass
+    node --test src/lib/landfireFuel.test.js -> 8/8 pass
+    npm run build                         -> pass
+    npm run validate:regional-inputs      -> pass
+    npm run validate:regional-offline     -> pass
+
+Also re-verified all 4 real live samples (not just the one from section 11)
+pass the fixed function directly, independent of the test suite.
+
+Browser check: started the dev server, clicked a CONUS location (rural
+Illinois, 38.99N/88.80W). The live WCS returned HTTP 502 at that exact
+moment (server logs show a clean upstream 502 pass-through, not an
+exception in the new validator code) -- this reconfirms the transport is
+still intermittent, it does not indicate the fix is wrong. The app fell
+back honestly: no crash, no console errors, scenario ran to completion
+under the documented fallback label. A live-success end-to-end browser
+screenshot (regional-active state) was NOT captured, because the endpoint
+did not return 200 again during the check window.
+
+Remaining gap: nobody has yet seen this fixed code path carry a live
+success all the way through the browser to a `regional-active` UI state.
+The fix is proven correct against 4 independently-fetched real payloads
+and does not regress any existing test, but end-to-end live-success
+browser proof is still open. Recommended next step: retry the browser
+click a handful of times (or add a short retry loop) when the endpoint is
+cooperating, and capture that screenshot/network trace as the missing
+evidence.
+
+Do not overwrite this section. Append a later dated update with exact
+commands and results after the next milestone.
+
+13. CLAUDE -- REAL PER-FIELD BENCHMARK INPUTS (TERRAIN/FUEL/WEATHER)
+----------------------------------------------------------------------
+
+Date: 2026-07-24 (same day, later in session)
+Agent: Claude Code
+
+Picked "heterogeneous benchmark inputs" as the next task: the 6-case
+hackathon benchmark used homogeneous TU2 fuel, flat terrain, and calm
+synthetic weather for every fire, which section 10's Codex checkpoint had
+already flagged as the main remaining credibility gap.
+
+Step 1 -- Wired real fuel + real weather via pure reuse, no new fetch
+logic:
+
+    fetchHistoricalWeatherInputs  (src/lib/historicalWeather.js)
+    readWorldCoverFineField       (scripts/read-worldcover-fine-field.mjs)
+    crosswalkLandCoverToFuel      (src/lib/landCoverToFuel.js)
+
+All three already existed and were already tested; nothing new was
+written for these two fields. Added `scripts/build-regional-benchmark-
+fields.mjs`, a one-time script that is the ONLY thing in this whole
+change that touches the network -- it fetches once and freezes the
+result to a committed JSON fixture
+(`src/lib/regionalBenchmarkFields.generated.json`), so
+`npm run validate:hackathon` / `npm run validate:regional-offline` stay
+fully offline-reproducible (Phase 4.5). `hackathonBenchmarkRunner.js` now
+loads that fixture and reports each case's real-vs-fallback state
+per-field (`usingRealFields: {terrain, fuel, weather}`), not as a single
+all-or-nothing flag -- one field failing does not hide fields that
+succeeded.
+
+Step 2 -- Elevation quota, diagnosed and swapped, not retried blindly:
+
+Terrain initially used `fetchElevationField` (Open-Meteo elevation API),
+already used by the interactive app. It failed on ALL 6 cases with HTTP
+429. Direct `curl` against the endpoint outside the app confirmed the
+actual cause: `"Daily API request limit exceeded. Please try again
+tomorrow."` -- a hard daily quota, not a transient rate limit, so
+same-day backoff retry could never succeed.
+
+Investigated whether Open-Meteo was even the right source: its own
+`source` field already says `"Copernicus GLO-90 via Open-Meteo"` -- it is
+itself just a thin JSON-point-query proxy in front of Copernicus DEM, at
+3x coarser resolution (90m vs 30m) than the native product. Verified
+Copernicus DEM GLO-30 is available as public, unauthenticated COG tiles
+on AWS S3 (`https://copernicus-dem-30m.s3.amazonaws.com/...`, confirmed
+`HTTP 200`, `Accept-Ranges: bytes`, no auth headers required) and
+confirmed the exact tile scheme (1-degree tiles, 3600x3600 pixels,
+standard GeoTIFF metadata) via a direct `fromUrl` read. Rewrote the
+terrain fetch in `scripts/build-regional-benchmark-fields.mjs` to read
+these tiles directly with the identical windowed-GeoTIFF-read pattern
+already used for the WorldCover fuel reader (tile-grouping, windowed
+`readRasters`, sample aggregation) -- no new pattern, no new dependency,
+just a different bucket/tile scheme. This eliminates the quota entirely:
+S3 static-object reads have no per-request cap.
+
+Re-ran the freeze script: all 6 cases now report terrain=real, fuel=real,
+weather=real (6/6 fully real, up from 0/6).
+
+Step 3 -- Real terrain exposed a genuine, previously-latent physics bug,
+root-caused and fixed at the source:
+
+With real (non-flat) terrain in place, `npm test` started failing:
+`RangeError: fireEllipse: backingRateMPerMin must not exceed
+headRateMPerMin, got 0.058398471989792214` inside
+`ellipseEccentricity` (`src/lib/fireEllipse.js`). Followed
+systematic-debugging rather than patching the assertion: added a
+temporary debug print to capture the actual head/backing values
+(0.05706671196617654 vs 0.058398471989792214, an ~2.3% inversion --
+confirmed NOT a floating-point tie, a real gap).
+
+Traced it to `src/lib/surfaceSpread.js`: the combined wind+slope
+"forcing direction" used to pick which candidate direction gets labeled
+`head` is a linear vector sum of the two component forces, but
+`calculateWindFactor`'s response to alignment is sub-linear
+(`alignment ** exponentB`, exponentB < 1) while
+`calculateSlopeFactor`'s is quadratic (`alignment ** 2`). When wind and
+slope point in different directions, that mismatch can make the
+heuristic's chosen direction a genuine ~2% slower than its exact
+opposite -- violating the ellipse transform's required
+head-is-the-maximum invariant (Andrews 2018). This was structurally
+impossible to hit before: with flat terrain, `slopeRadians` was always
+exactly 0 everywhere, so `calculateSlopeFactor` always short-circuited
+to a constant 0 and the wind/slope interaction never existed. All 342
+prior tests always ran on flat terrain.
+
+Fixed at the computation source in `surfaceSpread.js`, not by loosening
+the `fireEllipse.js` assertion: now computes both the forcing-direction
+rate and its exact opposite, and labels whichever is larger as `head`.
+No Rothermel/wind/slope formula changed -- only which of the two
+already-computed candidate directions receives the head label. Removed
+the temporary debug print before finishing.
+
+Verification after the fix:
+
+    npm test                          -> 343/343 pass
+    npm run validate:rothermel        -> pass (unchanged by the fix)
+    npm run validate:rothermel:rate   -> pass
+    npm run validate:waf              -> pass
+    npm run validate:convergence      -> pass
+    npm run build                     -> pass
+    npm run validate:hackathon        -> pass
+    npm run validate:regional-offline -> pass, zero network access
+
+Results, all 3 fields real (6/6 cases):
+
+    meanIoU     0.09420703132875036   (vs 0.0496747198962861 with
+                                        fuel+weather real but terrain
+                                        still flat; vs 0.30846459816160016
+                                        on the original fully-synthetic
+                                        homogeneous TU2/flat/calm baseline)
+    meanF1      0.15478433865635374
+    meanPrecision 0.9888888888888889
+    meanRecall  0.09441275636254803
+    bestCaseId  dinely-2017    (IoU 0.33088235294117646)
+    worstCaseId oregon-gulch-2014 (IoU 0.00043956043956043956)
+
+Interpretation: precision stayed near 1.0 while recall stayed low across
+this whole exercise -- the model consistently UNDERPREDICTS spread
+extent once real, heterogeneous fuel/terrain/weather replace the
+artificially generous synthetic baseline. This was not tuned toward any
+target at any step; each intermediate number (0.3085 -> 0.0497 -> 0.0942)
+is reported as-is. This is expected and informative, not a regression to
+chase: it reflects that real WorldCover-derived fuel is frequently lower-
+spread-rate or non-burnable relative to a blanket TU2 assumption, and
+real historical wind/moisture rarely matches the old "calm" default.
+
+Full evidence: `docs/regional-model-run/RESULTS.jsonl` (RUN-010,
+RUN-011), `docs/regional-model-run/APPROACH-REGISTRY.md` (RUN-010,
+RUN-011), `docs/regional-model-run/THREAD.md` (2026-07-24 updates 3-4).
+
+Changed/added files this section: `scripts/build-regional-benchmark-
+fields.mjs` (new), `src/lib/hackathonBenchmarkRunner.js`,
+`src/lib/hackathonBenchmarkRunner.test.js`,
+`src/lib/regionalBenchmarkFields.generated.json` (new, committed
+fixture), `src/lib/surfaceSpread.js`.
+
+Still required before claiming any operational accuracy: everything
+listed in prior sections (browser live-success proof for LANDFIRE,
+additional holdout fires, browser acceptance fixtures for regional
+success/fallback, suppression/spotting mechanisms). This section only
+closes the "benchmark inputs are homogeneous/synthetic" gap -- it does
+not change the underlying model's demonstrated accuracy, which remains
+low against real conditions (meanIoU 0.094) and is reported honestly as
+such, not improved by tuning.
+
+Do not overwrite this section. Append a later dated update with exact
+commands and results after the next milestone.

@@ -88,6 +88,33 @@ test('antimeridian: cell centers on both sides round-trip correctly', () => {
   }
 });
 
+test('near-pole cells preserve local distances and round-trip through geodesic mapping', () => {
+  const grid = createSpatialGrid({
+    latitude: 89.5, longitude: 40, cellSizeMeters: 1000, gridSize: 9
+  });
+  const center = grid.cellCenterLatLon(4, 4);
+  const east = grid.cellCenterLatLon(4, 5);
+  const north = grid.cellCenterLatLon(3, 4);
+  const distance = (a, b) => {
+    const lat1 = a.latitude * Math.PI / 180;
+    const lat2 = b.latitude * Math.PI / 180;
+    const dLat = lat2 - lat1;
+    const dLon = (b.longitude - a.longitude) * Math.PI / 180;
+    const h = Math.sin(dLat / 2) ** 2
+      + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+    return 6371008.8 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+  };
+
+  assert.ok(Math.abs(distance(center, east) - 1000) < 1);
+  assert.ok(Math.abs(distance(center, north) - 1000) < 1);
+  for (const [row, col] of [[0, 0], [4, 4], [8, 8], [2, 7]]) {
+    const point = grid.cellCenterLatLon(row, col);
+    const inverse = grid.latLonToCell(point.latitude, point.longitude);
+    assert.ok(Math.abs(inverse.row - row) < 1e-3);
+    assert.ok(Math.abs(inverse.col - col) < 1e-3);
+  }
+});
+
 test('rejects invalid inputs', () => {
   assert.throws(() => createSpatialGrid({
     latitude: NaN, longitude: 0, cellSizeMeters: 1000, gridSize: 128

@@ -23,6 +23,7 @@
 //   downstream code (crosswalk, UI) can qualify accordingly.
 
 export const LAND_COVER_CONFIDENCE = 'medium';
+export const PERMANENT_WATER_CLASS_CODE = 80;
 
 export function latLonToMosaicPixel(latitude, longitude, mosaic) {
   const [latMin, latMax] = mosaic.latitudeRange;
@@ -73,6 +74,9 @@ export async function createLandCoverSource({ imageReader, meta, pngUrl }) {
 
   return {
     classifyAtLatLon,
+    isWaterAtLatLon(latitude, longitude) {
+      return classifyAtLatLon(latitude, longitude)?.classCode === PERMANENT_WATER_CLASS_CODE;
+    },
     meta
   };
 }

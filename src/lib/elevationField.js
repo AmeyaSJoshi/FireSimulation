@@ -1,12 +1,13 @@
-const EARTH_KM_PER_DEGREE = 111.32;
+import { createSpatialGrid } from './spatialGrid.js';
+
 const ELEVATION_ENDPOINT = 'https://api.open-meteo.com/v1/elevation';
+export const MAX_ELEVATION_SAMPLES_PER_REQUEST = 100;
+export const DEFAULT_ELEVATION_FIELD_SAMPLE_SIZE = 32;
+const MAX_ELEVATION_FIELD_SAMPLE_SIZE = 64;
+const ELEVATION_REQUEST_CONCURRENCY = 4;
 
 function clamp(value, minimum, maximum) {
   return Math.min(maximum, Math.max(minimum, value));
-}
-
-function normalizeLongitude(longitude) {
-  return ((longitude + 180) % 360 + 360) % 360 - 180;
 }
 
 export function createElevationSampleRequest({
@@ -16,26 +17,72 @@ export function createElevationSampleRequest({
   spanKm = 128
 }) {
   const size = clamp(Math.floor(sampleSize), 2, 10);
-  const halfLatitudeSpan = spanKm / EARTH_KM_PER_DEGREE / 2;
-  const longitudeScale = Math.max(0.2, Math.cos(latitude * Math.PI / 180));
-  const halfLongitudeSpan = spanKm / (EARTH_KM_PER_DEGREE * longitudeScale) / 2;
-  const coordinates = [];
+  const coordinates = createElevationSampleCoordinates({ latitude, longitude, sampleSize: size, spanKm });
+  return {
+    url: createElevationUrl(coordinates),
+    coordinates,
+    sampleSize: size,
+    spanKm,
+    requestCount: 1
+  };
+}
 
-  for (let y = 0; y < size; y += 1) {
-    const latitudeOffset = halfLatitudeSpan - (y / (size - 1)) * halfLatitudeSpan * 2;
-    for (let x = 0; x < size; x += 1) {
-      const longitudeOffset = -halfLongitudeSpan + (x / (size - 1)) * halfLongitudeSpan * 2;
-      coordinates.push({
-        latitude: clamp(latitude + latitudeOffset, -90, 90),
-        longitude: normalizeLongitude(longitude + longitudeOffset)
-      });
+// Open-Meteo accepts at most 100 locations per request. Keep the high-
+// resolution field as one ordered raster, but split transport into bounded
+// batches so the fire grid does not inherit a multi-kilometre terrain blur.
+export function createElevationSampleRequests({
+  latitude,
+  longitude,
+  sampleSize = DEFAULT_ELEVATION_FIELD_SAMPLE_SIZE,
+  spanKm = 128,
+  maxSamplesPerRequest = MAX_ELEVATION_SAMPLES_PER_REQUEST
+} = {}) {
+  const size = clamp(Math.floor(sampleSize), 2, MAX_ELEVATION_FIELD_SAMPLE_SIZE);
+  if (!Number.isInteger(maxSamplesPerRequest)
+    || maxSamplesPerRequest < 1
+    || maxSamplesPerRequest > MAX_ELEVATION_SAMPLES_PER_REQUEST) {
+    throw new RangeError(
+      `elevationField: maxSamplesPerRequest must be an integer in [1, ${MAX_ELEVATION_SAMPLES_PER_REQUEST}]`
+    );
+  }
+  const coordinates = createElevationSampleCoordinates({ latitude, longitude, sampleSize: size, spanKm });
+  const requests = [];
+  for (let startIndex = 0; startIndex < coordinates.length; startIndex += maxSamplesPerRequest) {
+    const batch = coordinates.slice(startIndex, startIndex + maxSamplesPerRequest);
+    requests.push({
+      url: createElevationUrl(batch),
+      coordinates: batch,
+      startIndex,
+      sampleSize: size,
+      spanKm,
+      requestCount: Math.ceil(coordinates.length / maxSamplesPerRequest)
+    });
+  }
+  return requests;
+}
+
+function createElevationSampleCoordinates({ latitude, longitude, sampleSize, spanKm }) {
+  const coordinates = [];
+  const grid = createSpatialGrid({
+    latitude,
+    longitude,
+    cellSizeMeters: (spanKm * 1000) / (sampleSize - 1),
+    gridSize: sampleSize
+  });
+
+  for (let y = 0; y < sampleSize; y += 1) {
+    for (let x = 0; x < sampleSize; x += 1) {
+      coordinates.push(grid.cellCenterLatLon(y, x));
     }
   }
+  return coordinates;
+}
 
+function createElevationUrl(coordinates) {
   const url = new URL(ELEVATION_ENDPOINT);
-  url.searchParams.set('latitude', coordinates.map(({ latitude: value }) => value.toFixed(5)).join(','));
-  url.searchParams.set('longitude', coordinates.map(({ longitude: value }) => value.toFixed(5)).join(','));
-  return { url: url.toString(), coordinates, sampleSize: size, spanKm };
+  url.searchParams.set('latitude', coordinates.map(({ latitude }) => latitude.toFixed(5)).join(','));
+  url.searchParams.set('longitude', coordinates.map(({ longitude }) => longitude.toFixed(5)).join(','));
+  return url.toString();
 }
 
 export function quantizeElevationCacheKey(latitude, longitude, spanKm = 128) {
@@ -75,38 +122,55 @@ export function interpolateElevationGrid(samples, sampleSize, targetSize) {
 export async function fetchElevationField({
   latitude,
   longitude,
-  sampleSize = 10,
+  sampleSize = DEFAULT_ELEVATION_FIELD_SAMPLE_SIZE,
   spanKm = 128,
   targetSize = 128,
   timeoutMs = 7000,
   fetchImpl = globalThis.fetch
 }) {
   if (typeof fetchImpl !== 'function') throw new Error('Elevation fetch is unavailable');
-  const request = createElevationSampleRequest({ latitude, longitude, sampleSize, spanKm });
+  const requests = createElevationSampleRequests({ latitude, longitude, sampleSize, spanKm });
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
   const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
-  let response;
   try {
-    response = await fetchImpl(request.url, controller ? { signal: controller.signal } : undefined);
+    const samples = new Array(requests[0].sampleSize ** 2);
+    await mapWithConcurrency(requests, ELEVATION_REQUEST_CONCURRENCY, async (request) => {
+      const response = await fetchImpl(request.url, controller ? { signal: controller.signal } : undefined);
+      if (!response.ok) throw new Error(`Elevation request failed with ${response.status}`);
+      const payload = await response.json();
+      if (!Array.isArray(payload.elevation) || payload.elevation.length !== request.coordinates.length) {
+        throw new Error(`Elevation response did not include the expected ${request.coordinates.length}-point batch`);
+      }
+      if (payload.elevation.some((value) => typeof value !== 'number' || !Number.isFinite(value))) {
+        throw new Error('Elevation response contained non-finite elevation values');
+      }
+      for (let index = 0; index < payload.elevation.length; index += 1) {
+        samples[request.startIndex + index] = payload.elevation[index];
+      }
+    });
+    return {
+      heights: interpolateElevationGrid(samples, requests[0].sampleSize, targetSize),
+      sampleSize: requests[0].sampleSize,
+      requestCount: requests.length,
+      spanKm,
+      source: 'Copernicus GLO-90 via Open-Meteo',
+      fetchedAt: Date.now()
+    };
   } finally {
     if (timeoutId) clearTimeout(timeoutId);
   }
-  if (!response.ok) throw new Error(`Elevation request failed with ${response.status}`);
-  const payload = await response.json();
-  const expectedSamples = request.sampleSize * request.sampleSize;
-  if (!Array.isArray(payload.elevation) || payload.elevation.length !== expectedSamples) {
-    throw new Error(`Elevation response did not include the expected ${expectedSamples}-point grid`);
-  }
-  if (payload.elevation.some((value) => typeof value !== 'number' || !Number.isFinite(value))) {
-    throw new Error('Elevation response contained non-finite elevation values');
-  }
-  return {
-    heights: interpolateElevationGrid(payload.elevation, request.sampleSize, targetSize),
-    sampleSize: request.sampleSize,
-    spanKm: request.spanKm,
-    source: 'Copernicus GLO-90 via Open-Meteo',
-    fetchedAt: Date.now()
-  };
+}
+
+async function mapWithConcurrency(items, concurrency, worker) {
+  let nextIndex = 0;
+  const workerCount = Math.min(concurrency, items.length);
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      await worker(items[index]);
+    }
+  }));
 }
 
 // True when the cache entry is missing, has no valid timestamp, or is older
@@ -118,4 +182,4 @@ export function isElevationCacheEntryStale(entry, ttlMs) {
   return (Date.now() - entry.fetchedAt) > ttlMs;
 }
 
-export { EARTH_KM_PER_DEGREE, ELEVATION_ENDPOINT };
+export { ELEVATION_ENDPOINT };

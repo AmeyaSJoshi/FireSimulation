@@ -6,14 +6,50 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { cartesianToLatitudeLongitude, latitudeLongitudeToCartesian } from './lib/coordinateMath.js';
-import { fetchElevationField, quantizeElevationCacheKey } from './lib/elevationField.js';
-import { canIgniteSurface, surfaceIgnitionMessage } from './lib/ignitionPolicy.js';
+import {
+  DEFAULT_ELEVATION_FIELD_SAMPLE_SIZE,
+  fetchElevationField,
+  quantizeElevationCacheKey
+} from './lib/elevationField.js';
+import { createSpatialGrid } from './lib/spatialGrid.js';
+import { canIgniteFuelDecision, canIgniteSurface, surfaceIgnitionMessage } from './lib/ignitionPolicy.js';
 import { formatLocationLabel } from './lib/locationLabel.js';
+import { isLikelyWaterRgb, latitudeLongitudeToEarthUv, WATER_BLUE_MARGIN, WATER_BLUE_MIN } from './lib/fireOverlayMapping.js';
 import { buildSpreadExplanation, formatCompassDirection, formatElevationRange, formatModelTime } from './lib/scenarioInterpretation.js';
 import { clearScenarioRecords, compareScenarioMetrics, loadScenarioRecords, saveScenarioRecord } from './lib/scenarioRecords.js';
 import { createTerrainSampler } from './lib/terrainSampler.js';
 import { createCanvasImageReader, createLandCoverSource } from './lib/landCoverSource.js';
-import { crosswalkLandCoverToFuel } from './lib/landCoverToFuel.js';
+import { getFuelModel } from './lib/fuelModels.js';
+import {
+  LANDFIRE_FUEL_MIN_VALID_FRACTION,
+  LANDFIRE_FUEL_SOURCE
+} from './lib/landfireFuel.js';
+import {
+  crosswalkLandCoverToFuel,
+  FRACTIONAL_WATER_BARRIER_THRESHOLD_PERCENT
+} from './lib/landCoverToFuel.js';
+import { buildFuelModelCodeField } from './lib/fireFieldInputs.js';
+import { isSimulationSettled, shouldAutoRotate } from './lib/simulationLifecycle.js';
+import { compassToMathRadians, fetchWeatherInputs, windToMidflame } from './lib/weatherInputs.js';
+import {
+  aggregateWorldCoverFineSamples,
+  createWorldCoverFineSampleBatches,
+  nearestWorldCoverFineSample,
+  normalizeWorldCoverFineSamples,
+  summarizeWorldCoverFineCoverage,
+  WORLD_COVER_FINE_BATCH_RETRIES,
+  WORLD_COVER_FINE_REQUEST_CONCURRENCY,
+  WORLD_COVER_FINE_SAMPLE_OFFSETS,
+  WORLD_COVER_FINE_SAMPLES_PER_CELL
+} from './lib/worldCoverFine.js';
+import {
+  aggregateCanopyHeightSamples,
+  CANOPY_HEIGHT_SAMPLE_OFFSETS,
+  CANOPY_HEIGHT_SAMPLES_PER_CELL,
+  classifyCanopyHeight
+} from './lib/canopyHeight.js';
+import { resolveWaterEvidence, WATER_AUTHORITY_VERSION } from './lib/waterAuthority.js';
+import { classifyScenarioEvidence, formatScenarioEvidence } from './lib/scenarioEvidence.js';
 import './styles.css';
 
 // ─────────────────────────────────────────────────────────────
@@ -34,8 +70,12 @@ const windDirectionInput = document.querySelector('#wind-direction');
 const windDirectionValue = document.querySelector('#wind-direction-value');
 const moistureInput = document.querySelector('#moisture');
 const moistureValue = document.querySelector('#moisture-value');
+const weatherMoistureToggle = document.querySelector('#weather-moisture-toggle');
+const liveMoistureInput = document.querySelector('#live-moisture');
+const liveMoistureValue = document.querySelector('#live-moisture-value');
 const slopeInput = document.querySelector('#slope-strength');
 const slopeValue = document.querySelector('#slope-value');
+const uncertaintyToggle = document.querySelector('#uncertainty-toggle');
 const pauseButton = document.querySelector('#pause-button');
 const resetButton = document.querySelector('#reset-button');
 const simulationReadout = document.querySelector('#simulation-readout');
@@ -49,36 +89,64 @@ const maxSpreadValue = document.querySelector('#max-spread-value');
 const spreadRateValue = document.querySelector('#spread-rate-value');
 const modelValue = document.querySelector('#model-value');
 const terrainValue = document.querySelector('#terrain-value');
+const waterBasisValue = document.querySelector('#water-basis-value');
 const elevationValue = document.querySelector('#elevation-value');
 const fuelBasisValue = document.querySelector('#fuel-basis-value');
 const windBasisValue = document.querySelector('#wind-basis-value');
 const moistureBasisValue = document.querySelector('#moisture-basis-value');
+const liveMoistureBasisValue = document.querySelector('#live-moisture-basis-value');
 const slopeBasisValue = document.querySelector('#slope-basis-value');
 const seedValue = document.querySelector('#seed-value');
+const uncertaintyBasisValue = document.querySelector('#uncertainty-basis-value');
+const fuelFieldQualityValue = document.querySelector('#fuel-field-quality-value');
+const evidenceProfileValue = document.querySelector('#evidence-profile-value');
 const metadataState = document.querySelector('#metadata-state');
 const interpretationText = document.querySelector('#interpretation-text');
 const directionValue = document.querySelector('#direction-value');
 const guideScale = document.querySelector('#guide-scale');
 const clearHistoryButton = document.querySelector('#clear-history-button');
 const runHistoryList = document.querySelector('#run-history-list');
+const metadataToggle = document.querySelector('#metadata-toggle');
+const rangeInputs = [windSpeedInput, windDirectionInput, moistureInput, liveMoistureInput, slopeInput];
+const conditionPanel = document.querySelector('#condition-panel');
+const simulationPanel = document.querySelector('#simulation-panel');
+const hoverPausePanels = [conditionPanel, simulationPanel];
 
-const FIRE_GRID_SIZE = 128;
-const FIRE_CELL_SIZE_KM = 1;
+const FIRE_GRID_SIZE = 64;
+const FIRE_CELL_SIZE_KM = 0.5;
 const FIRE_FIELD_DIAMETER_KM = FIRE_GRID_SIZE * FIRE_CELL_SIZE_KM;
-const FIRE_DISPLAY_SCALE = 6;
+// The model field is 32 km; this is a presentation enlargement only. The
+// shader masks the enlarged footprint against the real Earth texture so it
+// cannot paint over visible water.
+const FIRE_DISPLAY_SCALE = 24;
+const FIRE_MAX_PROPAGATION_HOURS = 72;
+const FIRE_GRID_CENTER = (FIRE_GRID_SIZE - 1) / 2;
 const MODEL_TIMESTEP_MINUTES = 1;
 const SIMULATION_SEED = 17;
-// Phase 1 feature flag: which simulation engine the worker should run.
-// 'legacy'   = the incumbent cellular model in fireSimulation.js.
-// 'phase1'   = present for wiring; still delegates to the legacy model
-//              (no behavior change until Phase 3 introduces real physics).
-const SIMULATION_ENGINE = 'legacy';
+const ENSEMBLE_MEMBER_COUNT = 8;
+// These are deliberately labeled sensitivity bounds, not calibrated error
+// bars. They perturb only inputs already identified as estimated or mapped.
+const SENSITIVITY_PERTURBATIONS = Object.freeze({
+  windFraction: 0.10,
+  directionRadians: Math.PI / 36,
+  moistureFraction: 0.02,
+  liveMoistureFraction: 0.10,
+  fuelAvailabilityFraction: 0.10,
+  // Forest labels do not identify a unique surface fuel model. The
+  // deterministic run keeps the primary crosswalk; the optional ensemble
+  // samples only the explicit alternatives carried by the field.
+  fuelModelAlternatives: true
+});
+// The rate-based, location-aware engine is now the product path. Keep the
+// legacy engine available for controlled comparisons, but do not silently use
+// it for a normal click.
+const SIMULATION_ENGINE = 'phase1';
 const EARTH_RADIUS_KM = 6371;
 const SCENARIO_PRESETS = {
-  calm: { scenario: 'calm', windSpeed: 0, windDirection: 0, moisture: 32, slope: 0 },
-  wind: { scenario: 'calm', windSpeed: 45, windDirection: 45, moisture: 24, slope: 10 },
-  slope: { scenario: 'slope', windSpeed: 0, windDirection: 0, moisture: 30, slope: 100 },
-  barrier: { scenario: 'barrier', windSpeed: 0, windDirection: 0, moisture: 28, slope: 0 }
+  calm: { scenario: 'calm', windSpeed: 0, windDirection: 0, deadMoisture: 8, liveMoisture: 60, slope: 0 },
+  wind: { scenario: 'calm', windSpeed: 45, windDirection: 45, deadMoisture: 6, liveMoisture: 50, slope: 10 },
+  slope: { scenario: 'slope', windSpeed: 0, windDirection: 0, deadMoisture: 8, liveMoisture: 60, slope: 100 },
+  barrier: { scenario: 'barrier', windSpeed: 0, windDirection: 0, deadMoisture: 8, liveMoisture: 60, slope: 0 }
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -147,10 +215,28 @@ const terrainCache = new Map();
 const TERRAIN_CACHE_LIMIT = 12;
 let terrainMetadataStatus = 'Awaiting land';
 let terrainMetadataHeights = null;
+let terrainSamplingMetadata = null;
+let weatherMetadataStatus = 'Scenario fallback';
+let fineLandCoverStatus = 'Coarse WorldCover mosaic';
+let fractionalCoverStatus = 'Optional Copernicus layer';
+let canopyHeightStatus = 'Optional global canopy height';
+let globalFuelbedStatus = 'Global FCCS fuelbed fallback';
+let landfireFuelStatus = 'LANDFIRE FBFM40 unavailable · fallback';
+let ensembleMetadata = null;
+let scenarioEvidence = null;
+let lastWeather = null;
 let lastLandCover = null;
 let lastFuelDecision = null;
 let scenarioRecords = loadScenarioRecords();
 let activeScenarioContext = null;
+
+// The Earth texture is a visual guard for clicks and overlay masking. Model
+// water decisions go through resolveWaterEvidence so classified sources can
+// take precedence when they are available.
+function isMappedWaterAtLatLon(latitude, longitude) {
+  return terrainSampler?.isWaterAtLatLon?.(latitude, longitude) === true
+    || landCoverSource?.isWaterAtLatLon?.(latitude, longitude) === true;
+}
 
 // ─────────────────────────────────────────────────────────────
 // Starfield — procedural, spherical distribution, gentle twinkle
@@ -491,33 +577,518 @@ dayTexture.wrapT = THREE.ClampToEdgeWrapping;
 // being rendered, so a click can never be told it's ocean when the visible
 // pixel is land (or vice versa). Loads in parallel with the FBX model.
 let terrainSampler = null;
-createTerrainSampler('/earth/textures/1_earth_8k.jpg')
-  .then((sampler) => { terrainSampler = sampler; })
+const fallbackWaterMaskTexture = new THREE.DataTexture(
+  new Uint8Array([0]),
+  1,
+  1,
+  THREE.RedFormat,
+  THREE.UnsignedByteType
+);
+fallbackWaterMaskTexture.needsUpdate = true;
+let waterMaskTexture = fallbackWaterMaskTexture;
+createTerrainSampler('/earth/textures/1_earth_8k.jpg', { sampleWidth: 4096, sampleHeight: 2048 })
+  .then((sampler) => {
+    terrainSampler = sampler;
+    const oldWaterMaskTexture = waterMaskTexture;
+    waterMaskTexture = new THREE.DataTexture(
+      sampler.waterMaskData,
+      sampler.resolution.width,
+      sampler.resolution.height,
+      THREE.RedFormat,
+      THREE.UnsignedByteType
+    );
+    waterMaskTexture.flipY = true;
+    waterMaskTexture.needsUpdate = true;
+    if (oldWaterMaskTexture !== waterMaskTexture) oldWaterMaskTexture.dispose();
+    if (fireMaterial) {
+      fireMaterial.uniforms.uWaterMask.value = waterMaskTexture;
+      fireMaterial.uniforms.uWaterMaskReady.value = 1;
+    }
+  })
   .catch((error) => console.error('[terrain] sampler failed to load:', error));
 
 // Phase 2 land-cover source. The preprocessed WorldCover mosaic PNG lives
-// in public/ alongside its metadata sidecar. If either is missing (e.g.
-// preprocessing script has not been run in this workspace), the source
-// stays null and every classify call returns null — the crosswalk then
-// gracefully falls back to an experimental-confidence default.
+// in public/ alongside its metadata sidecar. Phase1 waits for this source;
+// unknown cells become non-burnable barriers instead of guessed fuel.
 let landCoverSource = null;
+let landCoverSourceStatus = 'loading';
 async function loadLandCoverSource() {
   try {
     const [meta, image] = await Promise.all([
       fetch('/landcover-coarse.json').then((r) => r.ok ? r.json() : null),
       loadImageElement('/landcover-coarse.png')
     ]);
-    if (!meta || !image) return;
+    if (!meta || !image) {
+      landCoverSourceStatus = 'unavailable';
+      return;
+    }
     landCoverSource = await createLandCoverSource({
       pngUrl: '/landcover-coarse.png',
       meta,
       imageReader: async () => createCanvasImageReader(image)
     });
+    landCoverSourceStatus = 'ready';
     console.info('[landcover] loaded', meta.source, meta.mosaic);
   } catch (error) {
+    landCoverSourceStatus = 'unavailable';
     console.warn('[landcover] source unavailable, falling back to experimental crosswalk:', error);
   }
+
 }
+
+async function fetchFineLandCoverAtLatLon(latitude, longitude) {
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 2_500) : null;
+  try {
+    const query = new URLSearchParams({ lat: String(latitude), lon: String(longitude) });
+    const response = await fetch(`/api/landcover/fine?${query}`, controller ? { signal: controller.signal } : undefined);
+    if (!response.ok) return null;
+    const payload = await response.json();
+    if (!Number.isInteger(payload?.classCode)) return null;
+    return payload;
+  } catch {
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function fetchCanopyHeightAtLatLon(latitude, longitude) {
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 2_500) : null;
+  try {
+    const query = new URLSearchParams({ lat: String(latitude), lon: String(longitude) });
+    const response = await fetch(`/api/canopy/height?${query}`, controller ? { signal: controller.signal } : undefined);
+    if (!response.ok) return null;
+    const payload = await response.json();
+    return classifyCanopyHeight(payload?.heights?.[0]);
+  } catch {
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function fetchCopernicusLandCoverAtLatLon(latitude, longitude) {
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 2_500) : null;
+  try {
+    const query = new URLSearchParams({ lat: String(latitude), lon: String(longitude) });
+    const response = await fetch('/api/landcover/fractions?' + query, controller ? { signal: controller.signal } : undefined);
+    if (!response.ok) return null;
+    const payload = await response.json();
+    if (payload.available !== true || !payload.coverFractions) return null;
+    fractionalCoverStatus = 'Copernicus 100 m fractions';
+    return payload;
+  } catch (error) {
+    console.info('[landcover] Copernicus point fractions unavailable:', error?.message ?? error);
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function fetchFineLandCoverField(grid) {
+  const samples = [];
+  for (let row = 0; row < grid.gridSize; row += 1) {
+    for (let col = 0; col < grid.gridSize; col += 1) {
+      for (const rowOffset of WORLD_COVER_FINE_SAMPLE_OFFSETS) {
+        for (const colOffset of WORLD_COVER_FINE_SAMPLE_OFFSETS) {
+          const { latitude, longitude } = grid.cellCenterLatLon(row + rowOffset, col + colOffset);
+          samples.push({ latitude, longitude });
+        }
+      }
+    }
+  }
+  const batches = createWorldCoverFineSampleBatches(samples);
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 30_000) : null;
+  try {
+    const classifications = new Array(samples.length);
+    let successfulBatchCount = 0;
+    await mapWithConcurrency(batches, WORLD_COVER_FINE_REQUEST_CONCURRENCY, async (batch) => {
+      try {
+        const batchClassifications = await fetchFineLandCoverBatch(batch, {
+          signal: controller?.signal,
+          maxAttempts: WORLD_COVER_FINE_BATCH_RETRIES
+        });
+        for (let index = 0; index < batchClassifications.length; index += 1) {
+          classifications[batch.startIndex + index] = batchClassifications[index];
+        }
+        successfulBatchCount += 1;
+      } catch (error) {
+        // A failed tile must not discard successful native samples from the
+        // rest of the field. Missing cells fall back to the coarse source.
+        console.info('[landcover] fine field batch unavailable:', error?.message ?? error);
+      }
+    });
+    const validSampleCount = classifications.reduce(
+      (count, classification) => count + (classification ? 1 : 0),
+      0
+    );
+    const coverage = summarizeWorldCoverFineCoverage({
+      totalSampleCount: samples.length,
+      validSampleCount,
+      totalBatchCount: batches.length,
+      successfulBatchCount
+    });
+    if (successfulBatchCount === 0) {
+      throw new Error('fine field returned no successful batches');
+    }
+    const aggregatedClassifications = aggregateWorldCoverFineSamples(classifications, {
+      gridSize: grid.gridSize,
+      samplesPerCell: WORLD_COVER_FINE_SAMPLES_PER_CELL
+    });
+    const coverageLabel = coverage.complete
+      ? 'complete'
+      : `${Math.round(coverage.sampleCoverageFraction * 100)}% samples · ${coverage.successfulBatchCount}/${coverage.totalBatchCount} batches`;
+    fineLandCoverStatus = `WorldCover 10 m COG · ${WORLD_COVER_FINE_SAMPLES_PER_CELL} samples/cell · ${coverageLabel}`;
+    return {
+      classifications: aggregatedClassifications,
+      sampleClassifications: classifications,
+      source: classifications.find(Boolean)?.source ?? 'ESA WorldCover 2021 v200 · 10 m COG',
+      resolutionMeters: 10,
+      requestCount: batches.length,
+      ...coverage
+    };
+  } catch (error) {
+    console.info('[landcover] fine field unavailable; using coarse global mosaic:', error?.message ?? error);
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function fetchGlobalFuelbedField(grid) {
+  const samples = [];
+  for (let row = 0; row < grid.gridSize; row += 1) {
+    for (let col = 0; col < grid.gridSize; col += 1) {
+      samples.push(grid.cellCenterLatLon(row, col));
+    }
+  }
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 75_000) : null;
+  try {
+    const response = await fetch('/api/fuelbed/global-field', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ samples }),
+      ...(controller ? { signal: controller.signal } : {})
+    });
+    if (!response.ok) throw new Error(`global fuelbed field failed with HTTP ${response.status}`);
+    const payload = await response.json();
+    if (payload.available !== true
+      || !Array.isArray(payload.fuelbeds)
+      || payload.fuelbeds.length !== samples.length) {
+      throw new Error('global fuelbed field returned an unexpected sample count');
+    }
+    const availableCount = payload.fuelbeds.reduce((count, value) => count + (value ? 1 : 0), 0);
+    globalFuelbedStatus = availableCount > 0
+      ? `Global FCCS v1.2 · ${availableCount}/${samples.length} cells`
+      : 'Global FCCS no coverage · WorldCover fallback';
+    return payload.fuelbeds;
+  } catch (error) {
+    console.info('[fuelbed] global FCCS field unavailable; using WorldCover fallback:', error?.message ?? error);
+    globalFuelbedStatus = 'Global FCCS unavailable · WorldCover fallback';
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function fetchCanopyHeightField(grid) {
+  const samples = [];
+  for (let row = 0; row < grid.gridSize; row += 1) {
+    for (let col = 0; col < grid.gridSize; col += 1) {
+      for (const rowOffset of CANOPY_HEIGHT_SAMPLE_OFFSETS) {
+        for (const colOffset of CANOPY_HEIGHT_SAMPLE_OFFSETS) {
+          const { latitude, longitude } = grid.cellCenterLatLon(row + rowOffset, col + colOffset);
+          samples.push({ latitude, longitude });
+        }
+      }
+    }
+  }
+  const batches = createWorldCoverFineSampleBatches(samples);
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 30_000) : null;
+  try {
+    const heightSamples = new Array(samples.length);
+    await mapWithConcurrency(batches, WORLD_COVER_FINE_REQUEST_CONCURRENCY, async (batch) => {
+      const response = await fetch('/api/canopy/height-field', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ samples: batch.samples }),
+        ...(controller ? { signal: controller.signal } : {})
+      });
+      if (!response.ok) throw new Error(`canopy height batch failed with HTTP ${response.status}`);
+      const payload = await response.json();
+      if (!Array.isArray(payload?.heights) || payload.heights.length !== batch.samples.length) {
+        throw new Error('canopy height batch returned an unexpected sample count');
+      }
+      for (let index = 0; index < payload.heights.length; index += 1) {
+        heightSamples[batch.startIndex + index] = classifyCanopyHeight(payload.heights[index]);
+      }
+    });
+    const aggregate = aggregateCanopyHeightSamples(heightSamples, {
+      gridSize: grid.gridSize,
+      samplesPerCell: CANOPY_HEIGHT_SAMPLES_PER_CELL
+    });
+    const values = new Float32Array(aggregate.length);
+    values.fill(-1);
+    let validCellCount = 0;
+    aggregate.forEach((sample, index) => {
+      if (!sample) return;
+      values[index] = sample.heightMeters;
+      validCellCount += 1;
+    });
+    canopyHeightStatus = `Canopy height 10 m · ${validCellCount}/${aggregate.length} cells`;
+    return { values, validCellCount, requestCount: batches.length };
+  } catch (error) {
+    console.info('[canopy] field unavailable; retaining land-cover shelter fallback:', error?.message ?? error);
+    canopyHeightStatus = 'Canopy height unavailable · land-cover shelter fallback';
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function fetchLandfireCanopyField(grid) {
+  const bbox = gridBbox(grid);
+  if (!bbox) return null;
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 20_000) : null;
+  try {
+    const response = await fetch('/api/canopy/landfire-field', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bbox, width: grid.gridSize, height: grid.gridSize }),
+      ...(controller ? { signal: controller.signal } : {})
+    });
+    if (!response.ok) return null;
+    const payload = await response.json();
+    if (payload.available !== true
+      || !Array.isArray(payload.canopyHeightMeters)
+      || !Array.isArray(payload.canopyCoverFraction)
+      || !Array.isArray(payload.canopyBaseHeightMeters)
+      || !Array.isArray(payload.canopyBulkDensityKgPerM3)
+      || payload.canopyHeightMeters.length !== grid.gridSize * grid.gridSize
+      || payload.canopyCoverFraction.length !== grid.gridSize * grid.gridSize
+      || payload.canopyBaseHeightMeters.length !== grid.gridSize * grid.gridSize
+      || payload.canopyBulkDensityKgPerM3.length !== grid.gridSize * grid.gridSize) {
+      return null;
+    }
+    const canopyHeightByCell = new Float32Array(payload.canopyHeightMeters.length);
+    const canopyCoverFractionByCell = new Float32Array(payload.canopyCoverFraction.length);
+    const canopyBaseHeightByCell = new Float32Array(payload.canopyBaseHeightMeters.length);
+    const canopyBulkDensityByCell = new Float32Array(payload.canopyBulkDensityKgPerM3.length);
+    canopyHeightByCell.fill(-1);
+    canopyCoverFractionByCell.fill(-1);
+    canopyBaseHeightByCell.fill(-1);
+    canopyBulkDensityByCell.fill(-1);
+    payload.canopyHeightMeters.forEach((value, index) => {
+      if (Number.isFinite(value) && value > 0) canopyHeightByCell[index] = value;
+    });
+    payload.canopyCoverFraction.forEach((value, index) => {
+      if (Number.isFinite(value) && value >= 0 && value <= 1) canopyCoverFractionByCell[index] = value;
+    });
+    payload.canopyBaseHeightMeters.forEach((value, index) => {
+      if (Number.isFinite(value) && value >= 0) canopyBaseHeightByCell[index] = value;
+    });
+    payload.canopyBulkDensityKgPerM3.forEach((value, index) => {
+      if (Number.isFinite(value) && value > 0) canopyBulkDensityByCell[index] = value;
+    });
+    return {
+      source: payload.source,
+      canopyHeightByCell,
+      canopyCoverFractionByCell,
+      canopyBaseHeightByCell,
+      canopyBulkDensityByCell,
+      canopyWindStructureCellCount: Number(payload.canopyWindStructureCellCount) || 0,
+      crownStructureCellCount: Number(payload.crownStructureCellCount) || 0
+    };
+  } catch (error) {
+    console.info('[canopy] LANDFIRE structure unavailable; crown behavior stays disabled:', error?.message ?? error);
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function fetchLandfireFuelField(grid) {
+  const bbox = gridBbox(grid);
+  if (!bbox) return null;
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 25_000) : null;
+  try {
+    const response = await fetch('/api/fuel/landfire-field', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bbox, width: grid.gridSize, height: grid.gridSize }),
+      ...(controller ? { signal: controller.signal } : {})
+    });
+    if (!response.ok) {
+      landfireFuelStatus = 'LANDFIRE FBFM40 unavailable · fallback';
+      return null;
+    }
+    const payload = await response.json();
+    const expectedLength = grid.gridSize * grid.gridSize;
+    if (payload.available !== true
+      || !Array.isArray(payload.fuelModelCodes)
+      || payload.fuelModelCodes.length !== expectedLength) {
+      landfireFuelStatus = payload.reason === 'outside_conus_coverage'
+        ? 'LANDFIRE FBFM40 outside CONUS · fallback'
+        : payload.reason === 'insufficient_valid_coverage'
+          ? 'LANDFIRE FBFM40 partial coverage · fallback'
+        : 'LANDFIRE FBFM40 unavailable · fallback';
+      return null;
+    }
+    const validCellCount = payload.fuelModelCodes.filter(Boolean).length;
+    const validCellFraction = Number(payload.validCellFraction);
+    if (validCellCount === 0 || !Number.isFinite(validCellFraction)
+      || validCellFraction < LANDFIRE_FUEL_MIN_VALID_FRACTION) {
+      landfireFuelStatus = 'LANDFIRE FBFM40 returned no valid cells · fallback';
+      return null;
+    }
+    landfireFuelStatus = `${LANDFIRE_FUEL_SOURCE} · ${validCellCount}/${expectedLength} cells (${Math.round(validCellFraction * 100)}%)`;
+    return {
+      source: payload.source ?? LANDFIRE_FUEL_SOURCE,
+      resolutionMeters: Number(payload.resolutionMeters) || 30,
+      fuelModelCodes: payload.fuelModelCodes,
+      validCellCount,
+      validCellFraction,
+      modelCounts: payload.modelCounts ?? null,
+      geometry: payload.geometry ?? null
+    };
+  } catch (error) {
+    console.info('[fuel] LANDFIRE FBFM40 unavailable; retaining global fallback:', error?.message ?? error);
+    landfireFuelStatus = 'LANDFIRE FBFM40 unavailable · fallback';
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function fetchFineLandCoverBatch(batch, { signal = null, maxAttempts = 1 } = {}) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const response = await fetch('/api/landcover/fine-field', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ samples: batch.samples }),
+        ...(signal ? { signal } : {})
+      });
+      if (!response.ok) throw new Error(`fine field batch failed with HTTP ${response.status}`);
+      const payload = await response.json();
+      const classifications = normalizeWorldCoverFineSamples(payload);
+      if (!classifications || classifications.length !== batch.samples.length) {
+        throw new Error('fine field batch returned an unexpected sample count');
+      }
+      return classifications;
+    } catch (error) {
+      lastError = error;
+      if (signal?.aborted || attempt === maxAttempts) throw error;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(250 * (2 ** (attempt - 1)), 1000)));
+    }
+  }
+  throw lastError ?? new Error('fine field batch failed without an error');
+}
+
+async function mapWithConcurrency(items, concurrency, worker) {
+  let nextIndex = 0;
+  const workerCount = Math.min(concurrency, items.length);
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      await worker(items[index]);
+    }
+  }));
+}
+
+async function fetchCopernicusLandCoverField(grid) {
+  const bbox = gridBbox(grid);
+  if (!bbox) return null;
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 15_000) : null;
+  try {
+    const response = await fetch('/api/landcover/fractions-field', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bbox, width: grid.gridSize, height: grid.gridSize }),
+      ...(controller ? { signal: controller.signal } : {})
+    });
+    if (!response.ok) return null;
+    const payload = await response.json();
+    if (payload.available !== true
+      || !Array.isArray(payload.samples)
+      || payload.samples.length !== grid.gridSize * grid.gridSize) {
+      return null;
+    }
+    fractionalCoverStatus = 'Copernicus 100 m fractions';
+    return payload;
+  } catch (error) {
+    console.info('[landcover] Copernicus field fractions unavailable:', error?.message ?? error);
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function gridBbox(grid) {
+  const corners = [
+    grid.cellCenterLatLon(0, 0),
+    grid.cellCenterLatLon(0, grid.gridSize - 1),
+    grid.cellCenterLatLon(grid.gridSize - 1, 0),
+    grid.cellCenterLatLon(grid.gridSize - 1, grid.gridSize - 1)
+  ];
+  const longitudes = corners.map((point) => point.longitude);
+  const latitudes = corners.map((point) => point.latitude);
+  const west = Math.min(...longitudes);
+  const east = Math.max(...longitudes);
+  if (east - west > 180) return null;
+  const latitudePad = grid.cellSizeMeters / 111320;
+  const longitudePad = latitudePad / Math.max(Math.cos(grid.origin.latitude * Math.PI / 180), 0.1);
+  return [
+    Math.max(-180, west - longitudePad),
+    Math.max(-90, Math.min(...latitudes) - latitudePad),
+    Math.min(180, east + longitudePad),
+    Math.min(90, Math.max(...latitudes) + latitudePad)
+  ];
+}
+
+function attachFractionalCover(landCover, fractionalSample) {
+  if (!landCover || !fractionalSample?.coverFractions) return landCover;
+  return {
+    ...landCover,
+    coverFractions: fractionalSample.coverFractions,
+    fractionalCoverSource: fractionalSample.source,
+    fractionalCoverResolutionMeters: fractionalSample.resolutionMeters,
+    fractionalCoverConfidence: fractionalSample.sourceConfidence
+  };
+}
+
+function isFractionalWater(fractionalSample) {
+  const fractions = fractionalSample?.coverFractions;
+  if (!fractions) return false;
+  const permanent = Number.isFinite(fractions.permanentWaterCoverFraction)
+    ? fractions.permanentWaterCoverFraction
+    : 0;
+  const seasonal = Number.isFinite(fractions.seasonalWaterCoverFraction)
+    ? fractions.seasonalWaterCoverFraction
+    : 0;
+  return permanent + seasonal >= FRACTIONAL_WATER_BARRIER_THRESHOLD_PERCENT;
+}
+
+function fieldSampleAtLatLon(grid, field, latitude, longitude) {
+  if (!field?.samples) return null;
+  const cell = grid.latLonToCell(latitude, longitude);
+  const row = Math.round(cell.row);
+  const col = Math.round(cell.col);
+  if (row < 0 || row >= grid.gridSize || col < 0 || col >= grid.gridSize) return null;
+  return field.samples[row * grid.gridSize + col] ?? null;
+}
+
 function loadImageElement(url) {
   return new Promise((resolve) => {
     const image = new Image();
@@ -612,10 +1183,19 @@ function handleGlobeClick(event) {
     return;
   }
 
-  // Phase 2: classify land cover for the crosswalk. Always runs (cheap,
-  // in-memory), even under the legacy engine — the info surfaces in the
-  // scenario-basis metadata so users can see what the phase1 engine
-  // will consume when it's turned on. Legacy sim math is unchanged.
+  if (SIMULATION_ENGINE === 'phase1' && !landCoverSource) {
+    resetFireSimulation();
+    panelStatus.dataset.mode = 'blocked';
+    statusText.textContent = landCoverSourceStatus === 'loading'
+      ? 'Loading global land-cover field'
+      : 'Global land-cover field unavailable';
+    simulationReadout.textContent = 'Waiting for location-specific fuel data';
+    simulationNote.textContent = 'Fire model paused until land-cover data is available';
+    return;
+  }
+
+  // Classify the clicked location for scenario metadata. The phase1 worker
+  // also builds the complete local field from this same source.
   const landCover = landCoverSource
     ? landCoverSource.classifyAtLatLon(coordinates.latitude, coordinates.longitude)
     : null;
@@ -625,6 +1205,17 @@ function handleGlobeClick(event) {
   console.info('[landcover]',
     landCover ? `${landCover.className} (WC ${landCover.classCode})` : 'no coverage',
     `→ ${fuelDecision.fuelCode} (${fuelDecision.confidence})`);
+
+  if (!canIgniteFuelDecision(fuelDecision)) {
+    resetFireSimulation();
+    if (markerGroup) markerGroup.visible = false;
+    panelStatus.dataset.mode = 'blocked';
+    statusText.textContent = 'Non-burnable surface · no ignition';
+    simulationReadout.textContent = 'Select a burnable land surface';
+    simulationNote.textContent = fuelDecision.rationale;
+    setTerrainMetadata('Non-burnable surface');
+    return;
+  }
 
   placeMarker(localHitPoint);
   startFireSimulation(coordinates);
@@ -719,6 +1310,7 @@ function createFireOverlay(surfacePoint, radius) {
   const north = new THREE.Vector3().crossVectors(normal, east).normalize();
   const positions = [];
   const uvs = [];
+  const earthUvs = [];
   const indices = [];
 
   for (let y = 0; y <= segments; y += 1) {
@@ -737,6 +1329,9 @@ function createFireOverlay(surfacePoint, radius) {
         .multiplyScalar(radius * 1.006);
       positions.push(point.x, point.y, point.z);
       uvs.push(x / segments, 1 - y / segments);
+      const pointCoordinates = cartesianToLatitudeLongitude(point);
+      const earthUv = latitudeLongitudeToEarthUv(pointCoordinates.latitude, pointCoordinates.longitude);
+      earthUvs.push(earthUv.u, earthUv.v);
     }
   }
 
@@ -754,6 +1349,7 @@ function createFireOverlay(surfacePoint, radius) {
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geometry.setAttribute('aEarthUv', new THREE.Float32BufferAttribute(earthUvs, 2));
   geometry.setIndex(indices);
   geometry.computeVertexNormals();
 
@@ -773,6 +1369,9 @@ function createFireOverlay(surfacePoint, radius) {
   fireMaterial = new THREE.ShaderMaterial({
     uniforms: {
       uFireMap: { value: fireTexture },
+      uDayMap: { value: dayTexture },
+      uWaterMask: { value: waterMaskTexture },
+      uWaterMaskReady: { value: terrainSampler ? 1 : 0 },
       uTime: { value: 0 }
     },
     transparent: true,
@@ -782,9 +1381,12 @@ function createFireOverlay(surfacePoint, radius) {
     blending: THREE.AdditiveBlending,
     vertexShader: /* glsl */`
       varying vec2 vUv;
+      attribute vec2 aEarthUv;
+      varying vec2 vEarthUv;
       varying vec3 vWorldPosition;
       void main() {
         vUv = uv;
+        vEarthUv = aEarthUv;
         vec4 worldPosition = modelMatrix * vec4(position, 1.0);
         vWorldPosition = worldPosition.xyz;
         gl_Position = projectionMatrix * viewMatrix * worldPosition;
@@ -792,12 +1394,25 @@ function createFireOverlay(surfacePoint, radius) {
     `,
     fragmentShader: /* glsl */`
       uniform sampler2D uFireMap;
+      uniform sampler2D uDayMap;
+      uniform sampler2D uWaterMask;
+      uniform float uWaterMaskReady;
       uniform float uTime;
       varying vec2 vUv;
+      varying vec2 vEarthUv;
       varying vec3 vWorldPosition;
       void main() {
         vec4 fire = texture2D(uFireMap, vUv);
-        vec2 texel = vec2(1.0 / 128.0);
+        vec3 surface = texture2D(uDayMap, vEarthUv).rgb;
+        float waterScore = surface.b - max(surface.r, surface.g);
+        bool textureWater = surface.b * 255.0 >= ${WATER_BLUE_MIN}.0
+          && waterScore * 255.0 > ${WATER_BLUE_MARGIN}.0;
+        bool sampledWater = uWaterMaskReady > 0.5 && texture2D(uWaterMask, vEarthUv).r > 0.5;
+        // Keep the visible day texture as a second hard veto even after the
+        // auxiliary mask loads. This prevents a mask upload/orientation
+        // mismatch from showing fire over visibly blue water.
+        if (sampledWater || textureWater) discard;
+        vec2 texel = vec2(1.0 / ${FIRE_GRID_SIZE}.0);
         float neighborAlpha = min(
           min(texture2D(uFireMap, vUv + vec2(texel.x, 0.0)).a, texture2D(uFireMap, vUv - vec2(texel.x, 0.0)).a),
           min(texture2D(uFireMap, vUv + vec2(0.0, texel.y)).a, texture2D(uFireMap, vUv - vec2(0.0, texel.y)).a)
@@ -826,6 +1441,10 @@ function getSimulationParams() {
     windSpeed: Number(windSpeedInput.value),
     windDirection: Number(windDirectionInput.value),
     moisture: Number(moistureInput.value) / 100,
+    deadMoisture: Number(moistureInput.value) / 100,
+    liveMoisture: Number(liveMoistureInput.value) / 100,
+    useWeatherMoisture: weatherMoistureToggle?.checked ?? true,
+    useUncertaintyEnsemble: uncertaintyToggle?.checked ?? false,
     slopeStrength: Number(slopeInput.value) / 100
   };
 }
@@ -838,7 +1457,8 @@ function applyScenarioPreset() {
   const preset = getScenarioConfig();
   windSpeedInput.value = String(preset.windSpeed);
   windDirectionInput.value = String(preset.windDirection);
-  moistureInput.value = String(preset.moisture);
+  moistureInput.value = String(preset.deadMoisture ?? preset.moisture ?? 8);
+  liveMoistureInput.value = String(preset.liveMoisture ?? preset.deadMoisture ?? preset.moisture ?? 60);
   slopeInput.value = String(preset.slope);
   updateSimulationLabels();
   if (fireRunning) {
@@ -855,8 +1475,43 @@ function updateSimulationLabels() {
   windSpeedValue.textContent = `${windSpeedInput.value} km/h`;
   windDirectionValue.textContent = `${windDirectionInput.value.padStart(3, '0')}°`;
   moistureValue.textContent = `${moistureInput.value}%`;
+  liveMoistureValue.textContent = `${liveMoistureInput.value}%`;
   slopeValue.textContent = `${slopeInput.value}%`;
+  syncRangeFills();
   updateScenarioMetadata();
+}
+
+// Presentation only: sets a --fill custom property (0-100%) on each range
+// input so the CSS track can render a filled/unfilled split. Never reads
+// simulation state, never writes anything the worker consumes.
+function syncRangeFills() {
+  for (const input of rangeInputs) {
+    const min = Number(input.min) || 0;
+    const max = Number(input.max) || 100;
+    const percent = max > min ? ((Number(input.value) - min) / (max - min)) * 100 : 0;
+    input.style.setProperty('--fill', `${Math.max(0, Math.min(100, percent))}%`);
+  }
+}
+
+// Presentation only: a brief one-shot highlight so a meaningful moment
+// (ignition, settle) reads as a distinct event rather than blending into
+// the constant per-frame metric text updates.
+function flashPanels(...panels) {
+  for (const panel of panels) {
+    if (!panel) continue;
+    panel.classList.remove('ignite-flash');
+    // Force reflow so re-adding the class restarts the animation.
+    void panel.offsetWidth;
+    panel.classList.add('ignite-flash');
+  }
+}
+
+function flashMetricChips() {
+  document.querySelectorAll('.simulation-metrics > div').forEach((chip) => {
+    chip.classList.remove('metric-flash');
+    void chip.offsetWidth;
+    chip.classList.add('metric-flash');
+  });
 }
 
 function setTerrainMetadata(status, heights = null) {
@@ -868,28 +1523,60 @@ function setTerrainMetadata(status, heights = null) {
 function updateScenarioMetadata() {
   const fuelLabel = fuelSelect.selectedOptions[0]?.textContent ?? fuelSelect.value;
   const windDirection = windDirectionInput.value.padStart(3, '0');
-  modelValue.textContent = `Cellular · ${SIMULATION_ENGINE} · ${MODEL_TIMESTEP_MINUTES} min/tick`;
+  const params = getSimulationParams();
+  modelValue.textContent = `Rothermel · ${SIMULATION_ENGINE} · ${MODEL_TIMESTEP_MINUTES} min/tick`;
   terrainValue.textContent = terrainMetadataStatus;
+  waterBasisValue.textContent = fineLandCoverStatus + ' + ' + fractionalCoverStatus + ' + Earth 4k';
   elevationValue.textContent = formatElevationRange(terrainMetadataHeights);
   fuelBasisValue.textContent = formatFuelBasisLabel(fuelLabel);
-  windBasisValue.textContent = `${windDirection}° · ${windSpeedInput.value} km/h`;
-  moistureBasisValue.textContent = `${moistureInput.value}%`;
+  windBasisValue.textContent = weatherMetadataStatus === 'Scenario fallback'
+    ? `${windDirection}° · ${windSpeedInput.value} km/h`
+    : `${weatherMetadataStatus} · ${lastWeather?.wind?.midflameSpeedKmh?.toFixed(1) ?? '—'} km/h`;
+  const estimatedMoisture = lastWeather?.fuelMoisture?.byClass;
+  const estimatedLiveMoisture = lastWeather?.liveFuelMoisture?.byClass;
+  moistureBasisValue.textContent = weatherMoistureToggle?.checked && estimatedMoisture
+    ? `1h ${Math.round(estimatedMoisture['1h'] * 100)}% · 10h ${Math.round(estimatedMoisture['10h'] * 100)}% · 100h ${Math.round(estimatedMoisture['100h'] * 100)}%`
+    : `${moistureInput.value}% manual`;
+  liveMoistureBasisValue.textContent = weatherMoistureToggle?.checked && estimatedLiveMoisture
+    ? `Herb ${Math.round(estimatedLiveMoisture.herbaceous * 100)}% · woody ${Math.round(estimatedLiveMoisture.woody * 100)}%`
+    : `${liveMoistureInput.value}% manual`;
   slopeBasisValue.textContent = `${slopeInput.value}%`;
   scaleValue.textContent = `${FIRE_CELL_SIZE_KM} km cells · ${FIRE_FIELD_DIAMETER_KM} km field`;
   seedValue.textContent = String(SIMULATION_SEED);
+  uncertaintyBasisValue.textContent = params.useUncertaintyEnsemble
+    ? (ensembleMetadata
+      ? `${ensembleMetadata.memberCount}-member range`
+      : 'Loading range')
+    : 'Deterministic';
+  evidenceProfileValue.textContent = formatScenarioEvidence(scenarioEvidence);
   metadataState.textContent = terrainMetadataStatus;
   guideScale.textContent = `${FIRE_FIELD_DIAMETER_KM} km field`;
 }
 
-// Composite the legacy sim's fuel selection with the Phase 2 WorldCover
-// crosswalk. Both are shown so a reader can tell which one the current
-// engine is using (legacy → the dropdown) and what the phase1 engine
-// will consume (the crosswalked fuel) once flipped.
+// Keep the selected scenario label alongside the location-derived WorldCover
+// crosswalk so the scenario basis remains inspectable.
 function formatFuelBasisLabel(legacyDropdownLabel) {
   if (!lastFuelDecision) return legacyDropdownLabel;
   const confidence = lastFuelDecision.confidence;
   const wcName = lastLandCover?.className ?? 'unavailable';
-  return `${legacyDropdownLabel} · WC ${wcName} → ${lastFuelDecision.fuelCode} (${confidence})`;
+  const scale = Number.isFinite(lastFuelDecision.fuelLoadScale)
+    ? ` · fuel x${lastFuelDecision.fuelLoadScale.toFixed(2)}`
+    : '';
+  const fractional = lastFuelDecision.fractionalCoverUsed ? ' · 100 m fractions' : '';
+  const alternatives = lastFuelDecision.fuelModelAlternatives?.length > 1
+    ? ` · ${lastFuelDecision.fuelModelAlternatives.length} forest variants`
+    : '';
+  const global = lastFuelDecision.globalFuelbedId
+    ? ` · FCCS ${lastFuelDecision.globalFuelbedId}`
+    : (globalFuelbedStatus.includes('fallback') || globalFuelbedStatus.includes('unavailable')
+      ? ` · ${globalFuelbedStatus}`
+      : '');
+  const regional = lastFuelDecision.landfireFuelModelCode
+    ? ` · LANDFIRE ${lastFuelDecision.landfireFuelModelCode} (${lastFuelDecision.landfireFuelResolutionMeters ?? 30} m)`
+    : (landfireFuelStatus.includes('fallback') || landfireFuelStatus.includes('unavailable')
+      ? ` · ${landfireFuelStatus}`
+      : '');
+  return `${legacyDropdownLabel} · WC ${wcName} → ${lastFuelDecision.fuelCode} (${confidence})${scale}${fractional}${alternatives}${global}${regional}`;
 }
 
 function formatSignedMetric(value, unit) {
@@ -961,6 +1648,7 @@ function renderScenarioHistory() {
 function recordSettledScenario(metrics) {
   if (!activeScenarioContext || activeScenarioContext.recorded) return;
   activeScenarioContext.recorded = true;
+  flashMetricChips();
   const record = {
     id: `run-${Date.now()}-${fireRunId}`,
     createdAt: Date.now(),
@@ -972,6 +1660,15 @@ function recordSettledScenario(metrics) {
     terrain: terrainMetadataStatus,
     elevationRange: formatElevationRange(terrainMetadataHeights),
     seed: SIMULATION_SEED,
+    waterAuthorityVersion: activeScenarioContext.waterAuthorityVersion,
+    uncertainty: ensembleMetadata
+      ? {
+        memberCount: ensembleMetadata.memberCount,
+        seed: ensembleMetadata.seed,
+        footprintAtMinutes: ensembleMetadata.footprintAtMinutes,
+        interpretation: ensembleMetadata.interpretation
+      }
+      : null,
     metrics: {
       burnedAreaKm2: metrics.burnedAreaKm2 ?? 0,
       footprintAreaKm2: metrics.footprintAreaKm2 ?? 0,
@@ -979,7 +1676,10 @@ function recordSettledScenario(metrics) {
       maxSpreadDistanceKm: metrics.maxSpreadDistanceKm ?? 0,
       averageSpreadRateKmh: metrics.averageSpreadRateKmh ?? 0,
       elapsedMinutes: metrics.elapsedMinutes ?? 0,
-      dominantSpreadDirectionDeg: metrics.dominantSpreadDirectionDeg ?? 0
+      dominantSpreadDirectionDeg: metrics.dominantSpreadDirectionDeg ?? 0,
+      terminationReason: metrics.terminationReason ?? null,
+      horizonLimitedCellCount: metrics.horizonLimitedCellCount ?? 0,
+      fieldBoundaryReached: metrics.fieldBoundaryReached === true
     }
   };
   scenarioRecords = saveScenarioRecord(undefined, record);
@@ -993,8 +1693,10 @@ function replayScenario(record) {
   fuelSelect.value = params.fuelPreset ?? 'brush';
   windSpeedInput.value = String(params.windSpeed ?? 0);
   windDirectionInput.value = String(params.windDirection ?? 0);
-  moistureInput.value = String(Math.round((params.moisture ?? 0) * 100));
+  moistureInput.value = String(Math.round((params.deadMoisture ?? params.moisture ?? 0) * 100));
+  liveMoistureInput.value = String(Math.round((params.liveMoisture ?? params.moisture ?? 0.6) * 100));
   slopeInput.value = String(Math.round((params.slopeStrength ?? 0) * 100));
+  if (uncertaintyToggle) uncertaintyToggle.checked = params.useUncertaintyEnsemble === true;
   updateSimulationLabels();
   const point = latitudeLongitudeToCartesian({ ...record.coordinates, radius: earthRadius });
   const localPoint = new THREE.Vector3(point.x, point.y, point.z);
@@ -1006,13 +1708,64 @@ function replayScenario(record) {
 async function startFireSimulation(coordinates) {
   if (!earthRadius || !markerSurfacePoint.length()) return;
   const requestId = ++terrainRequestId;
+  fineLandCoverStatus = 'Coarse WorldCover mosaic';
+  globalFuelbedStatus = 'Global FCCS fuelbed fallback';
+  landfireFuelStatus = 'Loading LANDFIRE FBFM40';
+  canopyHeightStatus = 'Loading global canopy height';
+  scenarioEvidence = classifyScenarioEvidence({ coordinates });
+  updateScenarioMetadata();
+  const coarseClickedLandCover = landCoverSource
+    ? landCoverSource.classifyAtLatLon(coordinates.latitude, coordinates.longitude)
+    : null;
+  const [fineClickedLandCover, copernicusClickedLandCover, clickedCanopyHeight] = await Promise.all([
+    fetchFineLandCoverAtLatLon(coordinates.latitude, coordinates.longitude),
+    fetchCopernicusLandCoverAtLatLon(coordinates.latitude, coordinates.longitude),
+    fetchCanopyHeightAtLatLon(coordinates.latitude, coordinates.longitude)
+  ]);
+  if (requestId !== terrainRequestId) return;
+  const clickedLandCover = attachFractionalCover(
+    fineClickedLandCover ?? coarseClickedLandCover,
+    copernicusClickedLandCover
+  );
+  const clickedWater = resolveWaterEvidence({
+    fractionalWater: copernicusClickedLandCover?.coverFractions
+      ? isFractionalWater(copernicusClickedLandCover)
+      : null,
+    fineClassCode: fineClickedLandCover?.classCode ?? null,
+    coarseClassCode: coarseClickedLandCover?.classCode ?? null,
+    visualWater: !fineClickedLandCover
+      && isMappedWaterAtLatLon(coordinates.latitude, coordinates.longitude)
+  }).isWater;
+  if (clickedWater) {
+    resetFireSimulation();
+    if (markerGroup) markerGroup.visible = false;
+    panelStatus.dataset.mode = 'blocked';
+    statusText.textContent = 'Water surface · no ignition';
+    simulationReadout.textContent = 'Select a land surface to ignite';
+    simulationNote.textContent = 'Classified water source · fire ignition disabled';
+    setTerrainMetadata('Water · no ignition');
+    return;
+  }
+  const clickedFuelDecision = crosswalkLandCoverToFuel(clickedLandCover);
+  if (!canIgniteFuelDecision(clickedFuelDecision)) {
+    resetFireSimulation();
+    if (markerGroup) markerGroup.visible = false;
+    panelStatus.dataset.mode = 'blocked';
+    statusText.textContent = 'Non-burnable surface · no ignition';
+    simulationReadout.textContent = 'Select a burnable land surface';
+    simulationNote.textContent = clickedFuelDecision.rationale;
+    setTerrainMetadata('Non-burnable surface');
+    return;
+  }
   fireRunId += 1;
   createFireOverlay(markerSurfacePoint, earthRadius);
   fireRunning = true;
   firePaused = false;
+  manualAngularVelocity.set(0, 0);
   activeScenarioContext = {
     coordinates: { latitude: coordinates.latitude, longitude: coordinates.longitude },
     location: locationValue.textContent,
+    waterAuthorityVersion: WATER_AUTHORITY_VERSION,
     recorded: false
   };
   pauseButton.disabled = false;
@@ -1020,6 +1773,7 @@ async function startFireSimulation(coordinates) {
   pauseButton.textContent = 'Pause';
   pauseButton.setAttribute('aria-label', 'Pause simulation');
   panelStatus.dataset.mode = 'running';
+  flashPanels(conditionPanel, simulationPanel);
   statusText.textContent = 'Loading terrain · local elevation';
   simulationReadout.textContent = 'Loading terrain field · preparing fire grid';
   modelTimeValue.textContent = '0 min';
@@ -1032,6 +1786,45 @@ async function startFireSimulation(coordinates) {
   directionValue.textContent = 'Spread direction · —';
   setTerrainMetadata('Loading GLO-90');
   const scenarioConfig = getScenarioConfig();
+  const params = getSimulationParams();
+  lastLandCover = clickedLandCover;
+  lastFuelDecision = clickedFuelDecision;
+  ensembleMetadata = null;
+  weatherMetadataStatus = 'Loading weather';
+  updateScenarioMetadata();
+
+  const grid = createSpatialGrid({
+    latitude: coordinates.latitude,
+    longitude: coordinates.longitude,
+    cellSizeMeters: FIRE_CELL_SIZE_KM * 1000,
+    gridSize: FIRE_GRID_SIZE
+  });
+  const fineFieldPromise = fetchFineLandCoverField(grid);
+  const globalFuelbedFieldPromise = fetchGlobalFuelbedField(grid);
+  const fractionalFieldPromise = fetchCopernicusLandCoverField(grid);
+  const canopyHeightFieldPromise = fetchCanopyHeightField(grid);
+  const landfireCanopyFieldPromise = fetchLandfireCanopyField(grid);
+  const landfireFuelFieldPromise = fetchLandfireFuelField(grid);
+
+  const weatherPromise = SIMULATION_ENGINE === 'phase1'
+    ? fetchWeatherInputs({
+      latitude: coordinates.latitude,
+      longitude: coordinates.longitude,
+      canopySheltered: [10, 95].includes(clickedLandCover?.classCode)
+        && (clickedCanopyHeight?.heightMeters ?? 5) >= 2,
+      fuelModel: getFuelModel(clickedFuelDecision.fuelCode),
+      fuelBedDepthMeters: getFuelModel(clickedFuelDecision.fuelCode).fuelBedDepthMeters,
+      initialDeadMoistureByClass: {
+        '1h': params.deadMoisture,
+        '10h': params.deadMoisture,
+        '100h': params.deadMoisture
+      },
+      timeoutMs: 5000
+    }).catch((error) => {
+      console.warn('[weather] unavailable, using scenario controls:', error);
+      return null;
+    })
+    : Promise.resolve(null);
   const cacheKey = quantizeElevationCacheKey(
     coordinates.latitude,
     coordinates.longitude,
@@ -1040,15 +1833,21 @@ async function startFireSimulation(coordinates) {
   const cacheEntry = terrainCache.get(cacheKey);
   let terrainHeights = cacheEntry?.heights?.slice() ?? null;
   if (terrainHeights) {
-    simulationNote.textContent = `Cached GLO-90 terrain · ${FIRE_FIELD_DIAMETER_KM} km field · overlay ×${FIRE_DISPLAY_SCALE}`;
+    const sampleLabel = cacheEntry?.sampleSize
+      ? `${cacheEntry.sampleSize} × ${cacheEntry.sampleSize} terrain samples`
+      : 'cached terrain samples';
+    terrainSamplingMetadata = sampleLabel;
+    simulationNote.textContent = `Cached GLO-90 terrain · ${FIRE_FIELD_DIAMETER_KM} km field · ${sampleLabel} · overlay ×${FIRE_DISPLAY_SCALE}`;
     setTerrainMetadata('Cached GLO-90', terrainHeights);
   } else {
     try {
       const terrain = await fetchElevationField({
         latitude: coordinates.latitude,
         longitude: coordinates.longitude,
+        sampleSize: DEFAULT_ELEVATION_FIELD_SAMPLE_SIZE,
         targetSize: FIRE_GRID_SIZE,
-        spanKm: FIRE_FIELD_DIAMETER_KM
+        spanKm: FIRE_FIELD_DIAMETER_KM,
+        timeoutMs: 15_000
       });
       if (requestId !== terrainRequestId) return;
       terrainHeights = terrain.heights;
@@ -1057,10 +1856,13 @@ async function startFireSimulation(coordinates) {
       terrainCache.set(cacheKey, {
         heights: terrainHeights.slice(),
         fetchedAt: terrain.fetchedAt,
-        source: terrain.source
+        source: terrain.source,
+        sampleSize: terrain.sampleSize,
+        requestCount: terrain.requestCount
       });
+      terrainSamplingMetadata = `${terrain.sampleSize} × ${terrain.sampleSize} terrain samples / ${terrain.requestCount} requests`;
       while (terrainCache.size > TERRAIN_CACHE_LIMIT) terrainCache.delete(terrainCache.keys().next().value);
-      simulationNote.textContent = `GLO-90 terrain loaded · ${FIRE_FIELD_DIAMETER_KM} km field · overlay ×${FIRE_DISPLAY_SCALE}`;
+      simulationNote.textContent = `GLO-90 terrain loaded · ${FIRE_FIELD_DIAMETER_KM} km field · ${terrain.sampleSize} × ${terrain.sampleSize} samples / ${terrain.requestCount} requests · overlay ×${FIRE_DISPLAY_SCALE}`;
       setTerrainMetadata('GLO-90 loaded', terrainHeights);
     } catch (error) {
       if (requestId !== terrainRequestId) return;
@@ -1071,7 +1873,218 @@ async function startFireSimulation(coordinates) {
   }
 
   if (requestId !== terrainRequestId) return;
+  const weather = await weatherPromise;
+  if (requestId !== terrainRequestId) return;
+  lastWeather = weather;
+  weatherMetadataStatus = weather
+    ? (weather.windTimeline?.length > 1
+      ? 'Open-Meteo hourly + forecast'
+      : (weather.fuelMoisture || weather.liveFuelMoisture ? 'Open-Meteo hourly' : 'Open-Meteo current'))
+    : 'Scenario fallback';
+  scenarioEvidence = classifyScenarioEvidence({
+    coordinates,
+    terrainAvailable: Boolean(terrainHeights),
+    weatherAvailable: Boolean(weather)
+  });
+  updateScenarioMetadata();
+
+  const fineField = await fineFieldPromise;
+  if (requestId !== terrainRequestId) return;
+  if (fineField) updateScenarioMetadata();
+  const globalFuelbedField = await globalFuelbedFieldPromise;
+  if (requestId !== terrainRequestId) return;
+  updateScenarioMetadata();
+  const fractionalField = await fractionalFieldPromise;
+  if (requestId !== terrainRequestId) return;
+  if (fractionalField) updateScenarioMetadata();
+  const canopyHeightField = await canopyHeightFieldPromise;
+  if (requestId !== terrainRequestId) return;
+  if (canopyHeightField) updateScenarioMetadata();
+  const landfireCanopyField = await landfireCanopyFieldPromise;
+  if (requestId !== terrainRequestId) return;
+  if (landfireCanopyField) updateScenarioMetadata();
+  const landfireFuelField = await landfireFuelFieldPromise;
+  if (requestId !== terrainRequestId) return;
+  updateScenarioMetadata();
+  let activeLandCover = clickedLandCover;
+  let activeFuelDecision = clickedFuelDecision;
+  const ignitionCellIndex = Math.floor(FIRE_GRID_CENTER) * FIRE_GRID_SIZE + Math.floor(FIRE_GRID_CENTER);
+  const clickedLandfireFuelModelCode = landfireFuelField?.fuelModelCodes[ignitionCellIndex] ?? null;
+  if (clickedLandfireFuelModelCode) {
+    activeLandCover = {
+      ...activeLandCover,
+      landfireFuelModelCode: clickedLandfireFuelModelCode
+    };
+    const regionalDecision = crosswalkLandCoverToFuel(activeLandCover);
+    if (regionalDecision) {
+      activeFuelDecision = regionalDecision;
+      lastLandCover = activeLandCover;
+      lastFuelDecision = activeFuelDecision;
+      updateScenarioMetadata();
+    }
+  }
+  const clickedGlobalFuelbed = globalFuelbedField?.[ignitionCellIndex] ?? null;
+  if (clickedGlobalFuelbed && !clickedLandfireFuelModelCode) {
+    activeLandCover = { ...clickedLandCover, globalFuelbed: clickedGlobalFuelbed };
+    const globalDecision = crosswalkLandCoverToFuel(activeLandCover);
+    if (canIgniteFuelDecision(globalDecision)) {
+      activeFuelDecision = globalDecision;
+      lastLandCover = activeLandCover;
+      lastFuelDecision = activeFuelDecision;
+      updateScenarioMetadata();
+    }
+  }
+  if (!canIgniteFuelDecision(activeFuelDecision)) {
+    resetFireSimulation();
+    if (markerGroup) markerGroup.visible = false;
+    panelStatus.dataset.mode = 'blocked';
+    statusText.textContent = 'Regional fuel class · no ignition';
+    simulationReadout.textContent = 'Select a burnable land surface';
+    simulationNote.textContent = activeFuelDecision.rationale;
+    setTerrainMetadata('Regional non-burnable surface');
+    return;
+  }
+  const nearestFineSampleAtLatLon = (latitude, longitude) => {
+    if (!fineField?.sampleClassifications) return null;
+    const cell = grid.latLonToCell(latitude, longitude);
+    return nearestWorldCoverFineSample(fineField.sampleClassifications, {
+      gridSize: grid.gridSize,
+      cellRow: cell.row,
+      cellCol: cell.col
+    });
+  };
+  const globalFuelbedAtLatLon = (latitude, longitude) => {
+    if (!globalFuelbedField) return null;
+    const cell = grid.latLonToCell(latitude, longitude);
+    const row = Math.round(cell.row);
+    const col = Math.round(cell.col);
+    if (row < 0 || row >= FIRE_GRID_SIZE || col < 0 || col >= FIRE_GRID_SIZE) return null;
+    return globalFuelbedField[row * FIRE_GRID_SIZE + col] ?? null;
+  };
+  const landfireFuelAtLatLon = (latitude, longitude) => {
+    if (!landfireFuelField) return null;
+    const cell = grid.latLonToCell(latitude, longitude);
+    const row = Math.round(cell.row);
+    const col = Math.round(cell.col);
+    if (row < 0 || row >= FIRE_GRID_SIZE || col < 0 || col >= FIRE_GRID_SIZE) return null;
+    return landfireFuelField.fuelModelCodes[row * FIRE_GRID_SIZE + col] ?? null;
+  };
+  const isFineWaterAtLatLon = (latitude, longitude, context = null) => {
+    const cell = grid.latLonToCell(latitude, longitude);
+    const row = Math.round(cell.row);
+    const col = Math.round(cell.col);
+    const inField = row >= 0 && row < grid.gridSize && col >= 0 && col < grid.gridSize;
+    const index = row * grid.gridSize + col;
+    const fractionalSample = fieldSampleAtLatLon(grid, fractionalField, latitude, longitude);
+    const fineClassification = context?.kind === 'cell-edge'
+      ? nearestFineSampleAtLatLon(latitude, longitude)
+      : (inField ? fineField?.classifications[index] ?? null : null);
+    const fineClassCode = fineClassification?.classCode ?? null;
+    const coarseClassCode = landCoverSource?.classifyAtLatLon(latitude, longitude)?.classCode ?? null;
+    const edgeWater = context?.kind === 'cell-edge' && isMappedWaterAtLatLon(latitude, longitude);
+    return resolveWaterEvidence({
+      fractionalWater: fractionalSample?.coverFractions
+        ? isFractionalWater(fractionalSample)
+        : null,
+      fineClassCode,
+      coarseClassCode,
+      visualWater: edgeWater || (fineClassification === null
+        && fractionalSample === null
+        && isMappedWaterAtLatLon(latitude, longitude)),
+      edgeVisualVeto: context?.kind === 'cell-edge'
+    }).isWater;
+  };
+  let fuelField;
+  try {
+    fuelField = buildFuelModelCodeField({
+      grid,
+      classifyAtLatLon: (latitude, longitude) => attachFractionalCover(
+        {
+          ...landCoverSource.classifyAtLatLon(latitude, longitude),
+          globalFuelbed: globalFuelbedAtLatLon(latitude, longitude),
+          landfireFuelModelCode: landfireFuelAtLatLon(latitude, longitude)
+        },
+        fieldSampleAtLatLon(grid, fractionalField, latitude, longitude)
+      ),
+    classifyAtCell: fineField
+        ? (row, col) => {
+          const index = row * FIRE_GRID_SIZE + col;
+          const fineClassification = fineField.classifications[index];
+          const { latitude, longitude } = grid.cellCenterLatLon(row, col);
+          const fallbackClassification = landCoverSource.classifyAtLatLon(latitude, longitude);
+          return attachFractionalCover(
+            {
+              ...(fineClassification ?? fallbackClassification),
+              globalFuelbed: globalFuelbedField?.[index] ?? null,
+              landfireFuelModelCode: landfireFuelField?.fuelModelCodes[index] ?? null
+            },
+            fractionalField?.samples[index]
+          );
+        }
+        : null,
+      crosswalk: crosswalkLandCoverToFuel,
+      isWaterAtLatLon: isFineWaterAtLatLon,
+      canopyHeightByCell: landfireCanopyField?.canopyHeightByCell ?? canopyHeightField?.values ?? null,
+      canopyCoverFractionByCell: landfireCanopyField?.canopyCoverFractionByCell ?? null,
+      canopyBaseHeightByCell: landfireCanopyField?.canopyBaseHeightByCell ?? null,
+      canopyBulkDensityByCell: landfireCanopyField?.canopyBulkDensityByCell ?? null,
+      ignition: { x: FIRE_GRID_CENTER, y: FIRE_GRID_CENTER },
+      ignitionFuelCode: activeFuelDecision.fuelCode,
+      ignitionFuelLoadScale: activeFuelDecision.fuelLoadScale,
+      allowExperimental: false
+    });
+  } catch (error) {
+    console.error('[fuel-field] failed to build location-specific field:', error);
+    panelStatus.dataset.mode = 'blocked';
+    statusText.textContent = 'Location fuel field unavailable';
+    simulationReadout.textContent = 'Could not classify the local fuel raster';
+    simulationNote.textContent = 'No fire started · location data required';
+    fireRunning = false;
+    return;
+  }
+
+  fuelFieldQualityValue.textContent = formatFuelFieldQuality(fuelField.summary);
+  scenarioEvidence = classifyScenarioEvidence({
+    coordinates,
+    terrainAvailable: Boolean(terrainHeights),
+    fineLandCoverCoverage: fineField?.sampleCoverageFraction ?? 0,
+    fractionalCoverAvailable: Boolean(fractionalField),
+    landfireCanopyAvailable: Boolean(landfireCanopyField),
+    landfireFuelAvailable: Boolean(landfireFuelField),
+    weatherAvailable: Boolean(weather),
+    fuelSummary: fuelField.summary
+  });
+  updateScenarioMetadata();
+
+  if (fuelField.summary.burnableCellCount === 0) {
+    panelStatus.dataset.mode = 'blocked';
+    statusText.textContent = 'No burnable fuel in local field';
+    simulationReadout.textContent = 'Select a land surface with mapped fuel';
+    simulationNote.textContent = 'WorldCover classified the field as non-burnable';
+    fireRunning = false;
+    return;
+  }
+
   const transferredHeights = terrainHeights?.slice() ?? null;
+  const slopeGrade = Math.max(0, params.slopeStrength);
+  const usesPresetSlope = scenarioConfig.scenario === 'slope';
+  const weatherWind = weather?.wind;
+  const manualWind = params.windSpeed > 0;
+  const activeFuelModel = activeFuelDecision.fuelModelDefinition ?? getFuelModel(activeFuelDecision.fuelCode);
+  const fuelBedDepthMeters = activeFuelModel.fuelBedDepthMeters;
+  const canopySheltered = [10, 95].includes(activeLandCover?.classCode)
+    && (clickedCanopyHeight?.heightMeters ?? 5) >= 2;
+  const midflameWindKmh = manualWind
+    ? windToMidflame({
+      tenMeterWindKmh: params.windSpeed,
+      canopySheltered,
+      fuelBedDepthMeters,
+      fuelModel: activeFuelModel
+    }).speedKmh
+    : (weatherWind?.midflameSpeedKmh ?? 0);
+  const windDirectionRadians = manualWind
+    ? compassToMathRadians(params.windDirection)
+    : (weatherWind?.mathFrameRadians ?? compassToMathRadians(params.windDirection));
   const message = {
     type: 'start',
     config: {
@@ -1080,15 +2093,75 @@ async function startFireSimulation(coordinates) {
       size: FIRE_GRID_SIZE,
       cellSizeKm: FIRE_CELL_SIZE_KM,
       seed: SIMULATION_SEED,
+      waterAuthorityVersion: WATER_AUTHORITY_VERSION,
       scenario: scenarioConfig.scenario,
-      params: getSimulationParams(),
-      speed: 1,
+      params,
+      // Playback multiplier only: physics still advances in 1-minute ticks.
+      speed: 24,
       timestepMinutes: MODEL_TIMESTEP_MINUTES,
-      ignition: { x: 64, y: 64 },
-      terrainHeights: transferredHeights
+      ignition: { x: FIRE_GRID_CENTER, y: FIRE_GRID_CENTER },
+      // Phase1 consumes the location-specific field; legacy ignores it.
+      fuelModelCode: activeFuelDecision.fuelCode,
+      fuelBedDepthMeters,
+      canopySheltered,
+      canopyShelteredByCell: fuelField.canopyShelteredByCell,
+      canopyCrownAvailableByCell: fuelField.canopyCrownAvailableByCell,
+      canopyHeightByCell: fuelField.canopyHeightByCell,
+      canopyCoverFractionByCell: fuelField.canopyCoverFractionByCell,
+      canopyBaseHeightByCell: fuelField.canopyBaseHeightByCell,
+      canopyBulkDensityByCell: fuelField.canopyBulkDensityByCell,
+      fuelModelCodes: fuelField.fuelModelCodes,
+      fuelModelDefinitionsByCode: fuelField.fuelModelDefinitionsByCode,
+      fuelModelAlternativesByCell: fuelField.fuelModelAlternativesByCell,
+      fuelLoadScaleByCell: fuelField.fuelLoadScaleByCell,
+      fuelPersistenceMinutesByCell: fuelField.fuelPersistenceMinutesByCell,
+      moistureFraction: params.moisture,
+      deadMoistureFraction: params.deadMoisture,
+      liveMoistureFraction: params.liveMoisture,
+      deadMoistureByClass: params.useWeatherMoisture
+        ? (weather?.fuelMoisture?.byClass ?? null)
+        : null,
+      liveMoistureByClass: params.useWeatherMoisture
+        ? (weather?.liveFuelMoisture?.byClass ?? null)
+        : null,
+      waterBarrierEdges: fuelField.waterBarrierEdges,
+      weatherTimeline: !manualWind
+        ? (params.useWeatherMoisture
+          ? (weather?.weatherTimeline ?? weather?.windTimeline ?? null)
+          : (weather?.windTimeline ?? null))
+        : null,
+      midflameWindKmh,
+      windDirectionRadians,
+      defaultSlopeRadians: Math.atan(slopeGrade),
+      defaultSlopeAspectEast: 0,
+      defaultSlopeAspectNorth: usesPresetSlope ? 1 : 0,
+      terrainHeights: transferredHeights,
+      maxPropagationMinutes: FIRE_MAX_PROPAGATION_HOURS * 60,
+      ensemble: params.useUncertaintyEnsemble
+        ? {
+          enabled: true,
+          memberCount: ENSEMBLE_MEMBER_COUNT,
+          seed: SIMULATION_SEED,
+          perturbations: SENSITIVITY_PERTURBATIONS
+        }
+        : null
     }
   };
-  if (terrainHeights) fireWorker.postMessage(message, [terrainHeights.buffer]);
+  const transferables = [
+    ...(terrainHeights ? [terrainHeights.buffer] : []),
+    ...(fuelField.waterBarrierEdges ? [fuelField.waterBarrierEdges.buffer] : []),
+    ...(fuelField.fuelLoadScaleByCell ? [fuelField.fuelLoadScaleByCell.buffer] : []),
+    ...(fuelField.fuelPersistenceMinutesByCell
+      ? [fuelField.fuelPersistenceMinutesByCell.buffer]
+      : []),
+    ...(fuelField.canopyShelteredByCell ? [fuelField.canopyShelteredByCell.buffer] : []),
+    ...(fuelField.canopyCrownAvailableByCell ? [fuelField.canopyCrownAvailableByCell.buffer] : []),
+    ...(fuelField.canopyHeightByCell ? [fuelField.canopyHeightByCell.buffer] : []),
+    ...(fuelField.canopyCoverFractionByCell ? [fuelField.canopyCoverFractionByCell.buffer] : []),
+    ...(fuelField.canopyBaseHeightByCell ? [fuelField.canopyBaseHeightByCell.buffer] : []),
+    ...(fuelField.canopyBulkDensityByCell ? [fuelField.canopyBulkDensityByCell.buffer] : [])
+  ];
+  if (transferables.length > 0) fireWorker.postMessage(message, transferables);
   else fireWorker.postMessage(message);
 }
 
@@ -1098,6 +2171,17 @@ function resetFireSimulation() {
   fireWorker.postMessage({ type: 'stop' });
   fireRunning = false;
   firePaused = false;
+  manualAngularVelocity.set(0, 0);
+  lastWeather = null;
+  terrainSamplingMetadata = null;
+  fineLandCoverStatus = 'Coarse WorldCover mosaic';
+  fractionalCoverStatus = 'Optional Copernicus layer';
+  canopyHeightStatus = 'Optional global canopy height';
+  globalFuelbedStatus = 'Global FCCS fuelbed fallback';
+  landfireFuelStatus = 'LANDFIRE FBFM40 unavailable · fallback';
+  ensembleMetadata = null;
+  scenarioEvidence = null;
+  weatherMetadataStatus = 'Scenario fallback';
   activeScenarioContext = null;
   if (fireOverlay) fireOverlay.visible = false;
   pauseButton.disabled = true;
@@ -1115,7 +2199,42 @@ function resetFireSimulation() {
   spreadRateValue.textContent = '—';
   interpretationText.textContent = 'Click land to begin a scenario';
   directionValue.textContent = 'Spread direction · —';
-  simulationNote.textContent = 'Synthetic educational model · 1 min/tick · terrain loads on ignition';
+  fuelFieldQualityValue.textContent = 'Awaiting local field';
+  evidenceProfileValue.textContent = 'Awaiting location';
+  simulationNote.textContent = 'Rothermel surface model · 1 min/tick · terrain loads on ignition';
+  updateScenarioMetadata();
+}
+
+function formatFuelFieldQuality(summary) {
+  const total = Math.max(0, Number(summary?.totalCellCount) || 0);
+  const experimental = Number(summary?.experimentalCellCount) || 0;
+  const low = Number(summary?.lowConfidenceCellCount) || 0;
+  const unknown = Number(summary?.unknownOrUnclassifiedCellCount) || 0;
+  const canopyMeasured = Number(summary?.canopyHeightDataCellCount) || 0;
+  const canopyShelteredMeasured = Number(summary?.canopyHeightShelteredCellCount) || 0;
+  const crownMeasured = Number(summary?.crownStructureDataCellCount) || 0;
+  if (!total) return 'Unavailable';
+  const covered = Math.max(0, total - unknown);
+  const quality = experimental || unknown ? 'mapped with limits' : 'mapped';
+  const canopy = canopyMeasured > 0
+    ? ` · canopy ${canopyShelteredMeasured}/${canopyMeasured}`
+    : ' · canopy fallback';
+  const canopyWind = Number(summary?.canopyWindStructureDataCellCount) || 0;
+  const globalCanopy = Number(summary?.globalCanopyStructureDataCellCount) || 0;
+  const globalCanopyLabel = globalCanopy > 0 ? ` · FCCS structure ${globalCanopy}` : '';
+  const globalCanopyBaseHeight = Number(summary?.globalCanopyBaseHeightDataCellCount) || 0;
+  const globalCanopyBaseHeightLabel = globalCanopyBaseHeight > 0
+    ? ` · FCCS HLC proxy ${globalCanopyBaseHeight}`
+    : '';
+  const crown = crownMeasured > 0 ? ` · crown ${crownMeasured}` : '';
+  const wind = canopyWind > 0 ? ` · WAF ${canopyWind}` : '';
+  const variants = Number(summary?.fuelModelAlternativeCellCount) || 0;
+  const variantLabel = variants > 0 ? ` · ${variants} forest variants` : '';
+  const global = Number(summary?.globalFuelbedCellCount) || 0;
+  const globalLabel = global > 0 ? ` · FCCS ${global}` : '';
+  const regional = Number(summary?.regionalFuelCellCount) || 0;
+  const regionalLabel = regional > 0 ? ` · LANDFIRE FBFM40 ${regional}` : '';
+  return quality + ' · ' + Math.round((covered / total) * 100) + '% covered · ' + low + ' low' + canopy + wind + globalCanopyLabel + globalCanopyBaseHeightLabel + crown + variantLabel + globalLabel + regionalLabel;
 }
 
 fireWorker.onmessage = ({ data }) => {
@@ -1123,11 +2242,25 @@ fireWorker.onmessage = ({ data }) => {
   if (!fireTexture || !fireMaterial) return;
   fireTexture.image.data = data.frame;
   fireTexture.needsUpdate = true;
+  if (data.ensemble) {
+    ensembleMetadata = data.ensemble;
+    updateScenarioMetadata();
+    const range = data.ensemble.footprintAtMinutes;
+    const horizonHours = Number.isFinite(data.ensemble.horizonMinutes)
+      ? Math.round(data.ensemble.horizonMinutes / 60)
+      : null;
+    const lowArea = Math.round((range.low ?? 0) * FIRE_CELL_SIZE_KM ** 2);
+    const highArea = Math.round((range.high ?? 0) * FIRE_CELL_SIZE_KM ** 2);
+    simulationNote.textContent = horizonHours
+      ? `Experimental sensitivity range · ${lowArea}-${highArea} km² at ${horizonHours} h · uncalibrated`
+      : 'Experimental sensitivity range · uncalibrated';
+  }
   firePaused = data.paused;
   pauseButton.textContent = firePaused ? 'Resume' : 'Pause';
   pauseButton.setAttribute('aria-label', firePaused ? 'Resume simulation' : 'Pause simulation');
   if (data.terrainAvailable) {
-    simulationNote.textContent = `GLO-90 terrain loaded · ${FIRE_FIELD_DIAMETER_KM} km field · overlay ×${FIRE_DISPLAY_SCALE}`;
+    const sampleLabel = terrainSamplingMetadata ? ` · ${terrainSamplingMetadata}` : '';
+    simulationNote.textContent = `GLO-90 terrain loaded · ${FIRE_FIELD_DIAMETER_KM} km field${sampleLabel} · overlay ×${FIRE_DISPLAY_SCALE}`;
   }
   const metrics = data.metrics ?? {};
   const direction = formatCompassDirection(metrics.dominantSpreadDirectionDeg ?? 0);
@@ -1149,9 +2282,23 @@ fireWorker.onmessage = ({ data }) => {
   if (firePaused) {
     panelStatus.dataset.mode = 'armed';
     statusText.textContent = 'Simulation paused · resume when ready';
-  } else if (fireRunning && data.activeCount === 0 && data.stepCount > 10) {
+  } else if (fireRunning && isSimulationSettled(data)) {
+    fireRunning = false;
+    firePaused = false;
+    manualAngularVelocity.set(0, 0);
+    pauseButton.disabled = true;
     panelStatus.dataset.mode = 'armed';
-    statusText.textContent = 'Simulation settled · click to ignite again';
+    const terminationReason = metrics.terminationReason;
+    if (terminationReason === 'horizon_reached') {
+      statusText.textContent = 'Scenario horizon reached · click to ignite again';
+      simulationNote.textContent = `Spread capped at ${FIRE_MAX_PROPAGATION_HOURS} h · fuel beyond the horizon is not shown`;
+    } else if (terminationReason === 'field_boundary_reached') {
+      statusText.textContent = 'Model field boundary reached · click to ignite again';
+      simulationNote.textContent = 'Local field boundary reached · spread beyond the field is not shown';
+    } else {
+      statusText.textContent = 'Fire exhausted available fuel · click to ignite again';
+      simulationNote.textContent = 'No reachable burnable cells remain in the local field';
+    }
     recordSettledScenario(metrics);
   } else if (fireRunning) {
     panelStatus.dataset.mode = 'running';
@@ -1217,7 +2364,7 @@ function animate() {
   const now = performance.now();
   const timeSeconds = now * 0.001;
 
-  if (earthModel && !isDraggingEarth && !pointerDown &&
+  if (earthModel && shouldAutoRotate({ fireRunning }) && !isDraggingEarth && !pointerDown &&
       (!pointerOverCanvas || resumeRotationWhileHovered)) {
     earthSpinGroup.rotation.y += (AUTO_ROTATION_SPEED + manualAngularVelocity.y) * deltaSeconds;
     earthSpinGroup.rotation.x = THREE.MathUtils.clamp(
@@ -1337,10 +2484,17 @@ fuelSelect.addEventListener('change', handleSimulationControlChange);
 windSpeedInput.addEventListener('input', handleSimulationControlChange);
 windDirectionInput.addEventListener('input', handleSimulationControlChange);
 moistureInput.addEventListener('input', handleSimulationControlChange);
+weatherMoistureToggle?.addEventListener('change', handleSimulationControlChange);
+uncertaintyToggle?.addEventListener('change', handleSimulationControlChange);
+liveMoistureInput.addEventListener('input', handleSimulationControlChange);
 slopeInput.addEventListener('input', handleSimulationControlChange);
 pauseButton.addEventListener('click', () => fireWorker.postMessage({ type: 'pause' }));
 resetButton.addEventListener('click', resetFireSimulation);
 runHistoryList?.addEventListener('click', handleHistoryClick);
+metadataToggle?.addEventListener('click', () => {
+  const expanded = metadataToggle.getAttribute('aria-expanded') === 'true';
+  metadataToggle.setAttribute('aria-expanded', String(!expanded));
+});
 clearHistoryButton?.addEventListener('click', () => {
   clearScenarioRecords();
   scenarioRecords = [];
@@ -1356,6 +2510,17 @@ canvas.addEventListener('pointerenter', () => {
   resumeRotationWhileHovered = false;
 });
 canvas.addEventListener('pointerleave', () => { pointerOverCanvas = false; });
+// The floating panels sit visually on top of the canvas but are separate DOM
+// elements, so hovering them never fires the canvas's own pointerenter/leave
+// and the globe kept spinning under the cursor. Reuse the exact same pause
+// mechanism the canvas already uses so the behavior stays one code path.
+for (const panel of hoverPausePanels) {
+  panel?.addEventListener('pointerenter', () => {
+    pointerOverCanvas = true;
+    resumeRotationWhileHovered = false;
+  });
+  panel?.addEventListener('pointerleave', () => { pointerOverCanvas = false; });
+}
 canvas.addEventListener('click', handleCanvasClick);
 
 animate();

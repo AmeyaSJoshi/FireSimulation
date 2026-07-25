@@ -1,6 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createElevationSampleRequest, fetchElevationField, interpolateElevationGrid, isElevationCacheEntryStale, quantizeElevationCacheKey } from './elevationField.js';
+import {
+  createElevationSampleRequest,
+  createElevationSampleRequests,
+  fetchElevationField,
+  interpolateElevationGrid,
+  isElevationCacheEntryStale,
+  quantizeElevationCacheKey
+} from './elevationField.js';
 
 test('creates a bounded elevation request around the clicked coordinate', () => {
   const request = createElevationSampleRequest({
@@ -12,6 +19,39 @@ test('creates a bounded elevation request around the clicked coordinate', () => 
   assert.equal(request.coordinates.length, 100);
   assert.equal(request.url.startsWith('https://api.open-meteo.com/v1/elevation?'), true);
   assert.ok(request.coordinates.every(({ latitude, longitude }) => latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180));
+});
+
+test('keeps high-latitude elevation samples physically spaced', () => {
+  const request = createElevationSampleRequest({
+    latitude: 89.5,
+    longitude: 40,
+    sampleSize: 3,
+    spanKm: 20
+  });
+  const center = request.coordinates[4];
+  const east = request.coordinates[5];
+  const lat1 = center.latitude * Math.PI / 180;
+  const lat2 = east.latitude * Math.PI / 180;
+  const dLat = lat2 - lat1;
+  const dLon = (east.longitude - center.longitude) * Math.PI / 180;
+  const h = Math.sin(dLat / 2) ** 2
+    + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+  const distanceKm = 6371.0088 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+  assert.ok(Math.abs(distanceKm - 10) < 0.01, `east sample distance was ${distanceKm} km`);
+});
+
+test('splits a high-resolution terrain field into documented bounded requests', () => {
+  const requests = createElevationSampleRequests({
+    latitude: 37.7,
+    longitude: -122.4,
+    sampleSize: 32,
+    spanKm: 32
+  });
+
+  assert.equal(requests.length, 11);
+  assert.equal(requests.reduce((sum, request) => sum + request.coordinates.length, 0), 32 * 32);
+  assert.ok(requests.every((request) => request.coordinates.length <= 100));
+  assert.equal(requests.at(-1).requestCount, 11);
 });
 
 test('bilinearly expands corner elevations into a target terrain grid', () => {
@@ -35,6 +75,32 @@ test('parses a public elevation response into a fire-sized height field', async 
   assert.equal(terrain.heights.length, 16);
   assert.equal(terrain.source, 'Copernicus GLO-90 via Open-Meteo');
   assert.equal(terrain.heights[15], 30);
+});
+
+test('reassembles ordered elevation batches before interpolation', async () => {
+  let requestCount = 0;
+  const terrain = await fetchElevationField({
+    latitude: 37.7,
+    longitude: -122.4,
+    sampleSize: 11,
+    targetSize: 11,
+    spanKm: 11,
+    fetchImpl: async (url) => {
+      const count = Number(new URL(url).searchParams.get('latitude').split(',').length);
+      const batch = requestCount++;
+      return {
+        ok: true,
+        json: async () => ({ elevation: Array.from({ length: count }, (_, index) => batch * 100 + index) })
+      };
+    }
+  });
+
+  assert.equal(terrain.sampleSize, 11);
+  assert.equal(terrain.requestCount, 2);
+  assert.equal(terrain.heights[0], 0);
+  assert.equal(terrain.heights[99], 99);
+  assert.equal(terrain.heights[100], 100);
+  assert.equal(terrain.heights.at(-1), 120);
 });
 
 test('quantizes nearby clicks to a reusable terrain cache key', () => {

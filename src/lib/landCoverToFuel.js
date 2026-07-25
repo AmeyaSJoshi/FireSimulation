@@ -19,73 +19,213 @@
 //                  flag this in the UI.
 
 import { getFuelModel, NON_BURNABLE_FUEL_CODE } from './fuelModels.js';
+import { globalFuelbedToFuelDecision } from './globalFuelbed.js';
+import { landfireFuelModelToFuelDecision } from './landfireFuel.js';
 
-export const LAND_COVER_CROSSWALK_VERSION = '1.0.0';
+export const LAND_COVER_CROSSWALK_VERSION = '1.4.0';
+export const FRACTIONAL_WATER_BARRIER_THRESHOLD_PERCENT = 50;
+export const FRACTIONAL_VEGETATION_THRESHOLD_PERCENT = 20;
 
 // Deterministic table: WorldCover class code -> crosswalk row.
 const CROSSWALK = new Map([
+  [0, {
+    fuelCode: NON_BURNABLE_FUEL_CODE,
+    fuelLoadScale: 0,
+    confidence: 'medium',
+    rationale: 'WorldCover no-data → non-burnable barrier; the model must not invent fuel where the source has no class.'
+  }],
   [10, {
     fuelCode: 'TL1',
+    fuelModelAlternatives: ['TL1', 'TL3', 'TU2'],
+    fuelLoadScale: 1,
     confidence: 'medium',
+    // Compact litter under closed canopy can hold ignition through a brief
+    // humidity/rain excursion without a full duff/heavy-fuel bed (that
+    // stronger case is the separate, FCCS-evidenced globalFuelbedPersistenceMinutes
+    // bridge). 6 hours is a conservative fraction of that bridge's 48-hour
+    // ceiling, chosen because TL1 is explicitly the *low*-load litter class.
+    fuelPersistenceMinutes: 360,
     rationale: 'Tree cover → conifer/broadleaf litter approximated as Scott & Burgan TL1 (low load compact litter). Local species mix not considered.'
   }],
   [20, {
     fuelCode: 'SH2',
+    fuelLoadScale: 1,
     confidence: 'medium',
     rationale: 'Shrubland → Scott & Burgan SH2 (moderate load dry-climate shrub). Fuel age and moisture regime not considered.'
   }],
   [30, {
     fuelCode: 'GR2',
+    fuelLoadScale: 1,
     confidence: 'medium',
     rationale: 'Grassland → Scott & Burgan GR2 (low load dry-climate grass). Curing state and management not considered.'
   }],
   [40, {
     fuelCode: 'AG1',
+    fuelLoadScale: 0.65,
     confidence: 'low',
     rationale: 'Cropland → experimental agricultural fuel (AG1). Real crop-residue loads vary by crop, harvest stage, and month.'
   }],
   [50, {
     fuelCode: NON_BURNABLE_FUEL_CODE,
+    fuelLoadScale: 0,
     confidence: 'medium',
     rationale: 'Built-up → non-burnable barrier. Urban vegetation and wildland-urban interface fuels are not modeled.'
   }],
   [60, {
     fuelCode: 'GR1',
+    fuelLoadScale: 0.15,
     confidence: 'low',
     rationale: 'Bare / sparse vegetation → GR1 (sparse dry grass) as the lightest burnable model. Genuinely bare rock/sand cells behave closer to non-burnable but our mosaic cannot distinguish.'
   }],
   [70, {
     fuelCode: NON_BURNABLE_FUEL_CODE,
+    fuelLoadScale: 0,
     confidence: 'medium',
     rationale: 'Snow and ice → non-burnable.'
   }],
   [80, {
     fuelCode: NON_BURNABLE_FUEL_CODE,
+    fuelLoadScale: 0,
     confidence: 'medium',
     rationale: 'Permanent water bodies → non-burnable.'
   }],
   [90, {
     fuelCode: 'GS1',
+    fuelLoadScale: 0.35,
     confidence: 'low',
     rationale: 'Herbaceous wetland → GS1 (low load grass-shrub) as an approximation. Real wetland moisture regimes typically reduce spread below what GS1 predicts.'
   }],
   [95, {
     fuelCode: 'TL3',
+    fuelModelAlternatives: ['TL3', 'TL1'],
+    fuelLoadScale: 0.35,
     confidence: 'low',
     rationale: 'Mangroves → TL3 (moderate conifer litter) as a stand-in for closed-canopy wet forest. Real mangrove moisture generally exceeds moisture-of-extinction; ignition unlikely in practice.'
   }],
   [100, {
     fuelCode: 'GR1',
+    fuelLoadScale: 0.15,
     confidence: 'low',
     rationale: 'Moss and lichen → GR1 as a light-load approximation.'
   }]
 ]);
 
+// A routine diurnal humidity rise (observed in real archives to run
+// roughly 2-4 hours around dawn) briefly pushes fine dead fuel above its
+// moisture-of-extinction every night. An already-established, actively
+// burning fire edge does not go fully cold and require full re-ignition
+// for that -- residual heat along the flame front bridges a short dip.
+// This is a distinct, much smaller effect than the FCCS bridge's
+// litter/duff-evidence-based persistence (up to 48h): it is a floor
+// applied to every burnable decision, not a heavy-fuel-specific bonus.
+// Without it, zero persistence + a multi-day travel time across any
+// fine fast fuel guarantees the edge straddles at least one nightly dip
+// and never completes, regardless of how much simulated time is given
+// (see docs/regional-model-run/THREAD.md, 2026-07-24 update 6).
+export const MINIMUM_RESIDUAL_HEAT_PERSISTENCE_MINUTES = 240;
+
 export function crosswalkLandCoverToFuel(landCover) {
+  const decision = crosswalkLandCoverToFuelRaw(landCover);
+  if (!decision?.burnable) return decision;
+  return {
+    ...decision,
+    fuelPersistenceMinutes: Math.max(
+      Number.isFinite(decision.fuelPersistenceMinutes) ? decision.fuelPersistenceMinutes : 0,
+      MINIMUM_RESIDUAL_HEAT_PERSISTENCE_MINUTES
+    )
+  };
+}
+
+function crosswalkLandCoverToFuelRaw(landCover) {
   if (!landCover || typeof landCover.classCode !== 'number') {
     return experimentalDefault(
       'No land cover available for this location; using a conservative brush-like default so ignition still runs, but confidence is experimental.'
     );
+  }
+
+  const fractionalWater = fractionalWaterPercent(landCover.coverFractions);
+  if (fractionalWater >= FRACTIONAL_WATER_BARRIER_THRESHOLD_PERCENT) {
+    return {
+      fuelCode: NON_BURNABLE_FUEL_CODE,
+      fuelLoadScale: 0,
+      fuelDisplayName: getFuelModel(NON_BURNABLE_FUEL_CODE).displayName,
+      burnable: false,
+      confidence: 'medium',
+      rationale: 'Copernicus fractional water cover is ' + fractionalWater
+        + '% (threshold ' + FRACTIONAL_WATER_BARRIER_THRESHOLD_PERCENT
+        + '%) → hard non-burnable barrier.',
+      landCoverSource: landCover.fractionalCoverSource ?? landCover.source ?? null,
+      fractionalCoverSource: landCover.fractionalCoverSource ?? null,
+      fractionalCoverResolutionMeters: landCover.fractionalCoverResolutionMeters ?? null,
+      fractionalCoverConfidence: landCover.fractionalCoverConfidence ?? null,
+      fractionalCoverUsed: true,
+      crosswalkVersion: LAND_COVER_CROSSWALK_VERSION
+    };
+  }
+
+  // Keep explicit WorldCover barriers authoritative, then prefer the direct
+  // LANDFIRE FBFM40 observation over every coarse/global approximation.
+  if ([0, 50, 70, 80].includes(landCover.classCode)) {
+    const row = CROSSWALK.get(landCover.classCode);
+    if (row) {
+      const model = getFuelModel(row.fuelCode);
+      return {
+        fuelCode: row.fuelCode,
+        fuelModelAlternatives: null,
+        fuelLoadScale: 0,
+        fuelDisplayName: model.displayName,
+        burnable: false,
+        confidence: row.confidence,
+        rationale: row.rationale,
+        landCoverSource: landCover.source ?? null,
+        fractionalCoverSource: landCover.fractionalCoverSource ?? null,
+        fractionalCoverResolutionMeters: landCover.fractionalCoverResolutionMeters ?? null,
+        fractionalCoverConfidence: landCover.fractionalCoverConfidence ?? null,
+        fractionalCoverUsed: false,
+        crosswalkVersion: LAND_COVER_CROSSWALK_VERSION
+      };
+    }
+  }
+
+  if (landCover.landfireFuelModelCode) {
+    const regionalDecision = landfireFuelModelToFuelDecision(landCover.landfireFuelModelCode);
+    if (regionalDecision) {
+      return {
+        ...regionalDecision,
+        landCoverSource: landCover.source ?? null,
+        fractionalCoverSource: landCover.fractionalCoverSource ?? null,
+        fractionalCoverResolutionMeters: landCover.fractionalCoverResolutionMeters ?? null,
+        fractionalCoverConfidence: landCover.fractionalCoverConfidence ?? null,
+        fractionalCoverUsed: false,
+        fineSampleCount: Number.isInteger(landCover.fineSampleCount) ? landCover.fineSampleCount : null,
+        fineBurnableFraction: normalizedFineBurnableFraction(landCover.fineBurnableFraction),
+        crosswalkVersion: `${LAND_COVER_CROSSWALK_VERSION}+${regionalDecision.crosswalkVersion}`
+      };
+    }
+  }
+
+  // The global FCCS raster is a fuelbed observation, not a land-cover class.
+  // Use it for burnable land when present, while keeping WorldCover's explicit
+  // water, snow, built-up, and no-data classes as hard barriers.
+  if (!([0, 50, 70, 80].includes(landCover.classCode)) && landCover.globalFuelbed) {
+    const globalDecision = globalFuelbedToFuelDecision(landCover.globalFuelbed);
+    if (globalDecision) {
+      const fineBurnableFraction = normalizedFineBurnableFraction(landCover.fineBurnableFraction);
+      const fuelLoadScale = roundFraction(globalDecision.fuelLoadScale * fineBurnableFraction);
+      return {
+        ...globalDecision,
+        fuelLoadScale,
+        rationale: fineBurnableFraction < 1
+          ? `${globalDecision.rationale} Fine WorldCover samples reduce available fuel to ${Math.round(fineBurnableFraction * 100)}% of the cell.`
+          : globalDecision.rationale,
+        fineSampleCount: Number.isInteger(landCover.fineSampleCount) ? landCover.fineSampleCount : null,
+        fineBurnableFraction,
+        fractionalCoverSource: landCover.fractionalCoverSource ?? null,
+        fractionalCoverResolutionMeters: landCover.fractionalCoverResolutionMeters ?? null,
+        fractionalCoverConfidence: landCover.fractionalCoverConfidence ?? null,
+        crosswalkVersion: `${LAND_COVER_CROSSWALK_VERSION}+${globalDecision.crosswalkVersion}`
+      };
+    }
   }
 
   const row = CROSSWALK.get(landCover.classCode);
@@ -95,16 +235,113 @@ export function crosswalkLandCoverToFuel(landCover) {
     );
   }
 
+  const fractionalDecision = fractionalVegetationDecision(landCover);
+  if (fractionalDecision) return fractionalDecision;
+
   const fuelModel = getFuelModel(row.fuelCode);
+  const fineBurnableFraction = normalizedFineBurnableFraction(landCover.fineBurnableFraction);
+  const fuelLoadScale = roundFraction(row.fuelLoadScale * fineBurnableFraction);
   return {
     fuelCode: row.fuelCode,
+    fuelModelAlternatives: normalizeFuelModelAlternatives(row.fuelModelAlternatives, row.fuelCode),
+    fuelLoadScale,
     fuelDisplayName: fuelModel.displayName,
     burnable: fuelModel.burnable,
     confidence: row.confidence,
-    rationale: row.rationale,
+    rationale: fineBurnableFraction < 1
+      ? `${row.rationale} Fine WorldCover samples indicate ${Math.round(fineBurnableFraction * 100)}% burnable ground in this model cell; fuel availability is scaled by that observed sample fraction.`
+      : row.rationale,
     landCoverSource: landCover.source ?? null,
+    fractionalCoverSource: landCover.fractionalCoverSource ?? null,
+    fractionalCoverResolutionMeters: landCover.fractionalCoverResolutionMeters ?? null,
+    fractionalCoverConfidence: landCover.fractionalCoverConfidence ?? null,
+    fractionalCoverUsed: false,
+    fineSampleCount: Number.isInteger(landCover.fineSampleCount) ? landCover.fineSampleCount : null,
+    fineBurnableFraction,
+    fuelPersistenceMinutes: Number.isFinite(row.fuelPersistenceMinutes) ? row.fuelPersistenceMinutes : 0,
     crosswalkVersion: LAND_COVER_CROSSWALK_VERSION
   };
+}
+
+function fractionalVegetationDecision(landCover) {
+  if (!landCover?.coverFractions || landCover.burnable === false) return null;
+  if ([0, 50, 70, 80].includes(landCover.classCode)) return null;
+
+  const fractions = landCover.coverFractions;
+  const components = [
+    { key: 'treeCoverFraction', label: 'tree', fuelCode: 'TL1' },
+    { key: 'shrubCoverFraction', label: 'shrub', fuelCode: 'SH2' },
+    { key: 'grassCoverFraction', label: 'grass', fuelCode: landCover.classCode === 90 ? 'GS1' : 'GR2' },
+    { key: 'cropsCoverFraction', label: 'crop', fuelCode: 'AG1' }
+  ]
+    .map((component) => ({ ...component, fraction: readFraction(fractions[component.key]) }))
+    .filter((component) => component.fraction > 0);
+  if (components.length === 0) return null;
+
+  const vegetationCoverPercent = Math.min(100, components.reduce(
+    (sum, component) => sum + component.fraction,
+    0
+  ));
+  const dominant = components.reduce((current, component) => (
+    component.fraction > current.fraction ? component : current
+  ), components[0]);
+  if (dominant.fraction < FRACTIONAL_VEGETATION_THRESHOLD_PERCENT) return null;
+
+  const fuelModel = getFuelModel(dominant.fuelCode);
+  const fineBurnableFraction = normalizedFineBurnableFraction(landCover.fineBurnableFraction);
+  const fuelLoadScale = roundFraction((vegetationCoverPercent / 100) * fineBurnableFraction);
+  return {
+    fuelCode: dominant.fuelCode,
+    fuelModelAlternatives: normalizeFuelModelAlternatives(
+      dominant.fuelCode === 'TL1' ? ['TL1', 'TL3', 'TU2'] : null,
+      dominant.fuelCode
+    ),
+    fuelLoadScale,
+    fuelDisplayName: fuelModel.displayName,
+    burnable: fuelModel.burnable,
+    confidence: 'low',
+    rationale: `Copernicus fractional cover selects dominant ${dominant.label} vegetation (${dominant.fraction}%) with ${vegetationCoverPercent}% total mapped vegetation; ${dominant.fuelCode} is a fuel-model approximation and local fuel structure is not observed.${fineBurnableFraction < 1 ? ` Fine WorldCover samples reduce available fuel to ${Math.round(fineBurnableFraction * 100)}% of the cell.` : ''}`,
+    landCoverSource: landCover.source ?? null,
+    fractionalCoverSource: landCover.fractionalCoverSource ?? landCover.source ?? null,
+    fractionalCoverResolutionMeters: landCover.fractionalCoverResolutionMeters ?? null,
+    fractionalCoverConfidence: landCover.fractionalCoverConfidence ?? null,
+    fractionalCoverUsed: true,
+    fractionalVegetationCoverPercent: vegetationCoverPercent,
+    fractionalDominantCoverPercent: dominant.fraction,
+    fineSampleCount: Number.isInteger(landCover.fineSampleCount) ? landCover.fineSampleCount : null,
+    fineBurnableFraction,
+    crosswalkVersion: LAND_COVER_CROSSWALK_VERSION
+  };
+}
+
+function fractionalWaterPercent(coverFractions) {
+  if (!coverFractions || typeof coverFractions !== 'object') return 0;
+  const permanent = Number.isFinite(coverFractions.permanentWaterCoverFraction)
+    ? coverFractions.permanentWaterCoverFraction
+    : 0;
+  const seasonal = Number.isFinite(coverFractions.seasonalWaterCoverFraction)
+    ? coverFractions.seasonalWaterCoverFraction
+    : 0;
+  return Math.min(100, permanent + seasonal);
+}
+
+function readFraction(value) {
+  return Number.isFinite(value) && value >= 0 && value <= 100 ? value : 0;
+}
+
+function roundFraction(value) {
+  return Math.round(value * 100) / 100;
+}
+
+function normalizedFineBurnableFraction(value) {
+  return Number.isFinite(value) && value >= 0 && value <= 1 ? value : 1;
+}
+
+function normalizeFuelModelAlternatives(alternatives, primaryCode) {
+  if (!Array.isArray(alternatives)) return null;
+  const normalized = [...new Set([primaryCode, ...alternatives]
+    .filter((code) => typeof code === 'string'))];
+  return normalized.length > 1 ? normalized : null;
 }
 
 function experimentalDefault(rationale) {
@@ -114,11 +351,13 @@ function experimentalDefault(rationale) {
   const fuelModel = getFuelModel('GR1');
   return {
     fuelCode: 'GR1',
+    fuelLoadScale: 1,
     fuelDisplayName: fuelModel.displayName,
     burnable: true,
     confidence: 'experimental',
     rationale,
     landCoverSource: null,
+    fractionalCoverUsed: false,
     crosswalkVersion: LAND_COVER_CROSSWALK_VERSION
   };
 }

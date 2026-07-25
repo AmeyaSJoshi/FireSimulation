@@ -5,15 +5,13 @@
 **Purpose:** Phase 2 crosswalk from land cover → fire-behavior fuel model, per
 `docs/realistic-fire-model-claude-code-prompt.txt` § 6
 
-## Recommendation
+## Delivered path
 
-**Stop and pick a delivery path with the user.** ESA WorldCover 2021 is the
-right *dataset* — 10 m global coverage, 11 classes, CC BY 4.0 license, well
-documented by ESA — but its official public endpoints are all unfriendly to
-direct browser fetches. Getting it into the app requires either a small
-serverless proxy or a preprocessed coarse-resolution asset. Neither is
-blocked, but both are architecturally significant choices the prompt § 8
-says to run past you first.
+The project selected the zero-infrastructure path: a one-time Node
+preprocessing job produces a deterministic coarse global PNG and JSON sidecar.
+The browser reads that asset locally, so normal simulation clicks do not depend
+on a tile service, a proxy, or a paid account. The source remains ESA
+WorldCover 2021 v200; only the runtime representation is coarse.
 
 ## Dataset facts
 
@@ -94,7 +92,7 @@ viable, and Range-reading a COG requires a GeoTIFF parser (`geotiff.js`,
 ~90 KB min) — a new runtime dependency the prompt § 8 says to check with
 you first.
 
-## Available paths
+## Available paths considered
 
 Ranked by architectural simplicity, most-honest to most-clever:
 
@@ -156,9 +154,9 @@ weather ingest can proceed independently).
 **Pros:** honest about the gap, zero infrastructure. **Cons:** the
 whole point of Phase 2 land-cover work is defeated.
 
-## What I would pick if it were mine
+## What was shipped
 
-**Option B (preprocessed coarse asset)**, for four reasons:
+**Option B (preprocessed coarse asset)** was shipped for four reasons:
 
 1. It matches the existing project pattern (`terrainSampler.js` reads a
    preprocessed image the same way). Reviewer surprise = zero.
@@ -174,17 +172,95 @@ The precision loss is real but honest: at 4 km per pixel, "cropland" and
 "grassland" won't shift under a single click and the confidence label
 will say so.
 
-## What I need from you
+## Remaining accuracy limit
 
-One of:
+At runtime, classified ESA WorldCover fine/coarse samples and optional
+Copernicus fractional water are treated as model evidence. The Earth texture
+is retained for visual masking and as a conservative fallback when no
+classified sample is available. For ignition clicks, fine classified land and
+fractional land remain authoritative. For propagation edges, visible water is
+also an explicit conservative veto, so a fine cell-majority land label cannot
+open a transition across a visible shoreline or narrow water strip. An
+explicit fractional-land sample still prevents that veto when the texture is
+known to be a coarse false positive.
+For the interactive 0.5 km raster, sixteen native 10 m samples are taken
+inside each cell and majority-voted before the fuel crosswalk. Four samples
+per axis are placed near each edge as well as near the interior. Edge checks
+retain the nearest native water evidence instead of collapsing the query to
+the cell majority, reducing narrow-river and coastline errors without adding
+a paid service. The browser transports the full field as bounded ordered
+batches rather than one oversized request, with a small retry budget for
+transient COG failures. Successful batches are retained when another batch
+times out or fails; missing native samples are left unknown and the affected
+cells use the coarse global classification. If every batch fails, the explicit
+coarse fallback is used for the entire field. Runtime metadata reports the
+native sample fraction and successful/total batch count so partial coverage is
+never presented as a complete 10 m field.
 
-- **"Do B"** — I write the preprocessing script + Node dev-dep, run it,
-  ship the PNG, and Phase 2 proceeds using the terrainSampler pattern.
-- **"Do A"** — I write the Cloudflare Worker (or your preferred host),
-  you deploy it, we wire the frontend to that endpoint.
-- **"Do C for now"** — skip WorldCover this phase, revisit later.
-- **"Do something else"** — propose it, I'll verify transport first.
+The cell aggregation also preserves the fraction of valid native samples that
+are burnable. The majority class still determines fuel identity, while that
+sample fraction scales the available fuel load. This is a transparent
+within-cell prior for mixed water, built-up, sparse, or vegetated ground; it is
+not a regional calibration coefficient or a claim about measured biomass.
 
-I will not proceed on A or B without an explicit go-ahead, because both
-add either a runtime dependency (A: hosted service) or a build-time
-dependency (B: `geotiff` package) that § 8 requires I stop and ask about.
+The shipped mosaic is approximately 3.7 km per pixel. It is useful for global
+biome and permanent-water classification, but it cannot represent local fuel
+patches, narrow roads, small wetlands, or a fire's true stand structure. The
+crosswalk therefore emits a `fuelLoadScale` prior for sparse, wetland,
+mangrove, moss, and agricultural classes. That scale is an explicit heuristic,
+not a measured fuel load; the UI and metadata continue to label the crosswalk
+confidence. A finer regional source or a deployed COG proxy is the next
+resolution upgrade, not a silent change to the current global asset.
+
+## Local high-resolution path
+
+The localhost development server now adds an optional same-origin range-read
+adapter for the original ESA WorldCover 2021 10 m COGs:
+
+- `GET /api/landcover/fine?lat=<latitude>&lon=<longitude>` reads one class.
+- `POST /api/landcover/fine-field` reads the 64 x 64 fire field with sixteen
+  native samples per cell, grouping samples by 3-degree tile so a field
+  crossing a tile boundary is still handled correctly; transiently missing
+  batches fall back cell-by-cell to the coarse mosaic.
+- `src/main.js` uses the fine field for the active per-cell fuel raster and
+  falls back to the shipped coarse mosaic when the local adapter is absent or
+  unavailable.
+- `vite.config.js` keeps a four-tile LRU cache and uses `geotiff` range reads;
+  the browser never receives a multi-gigabyte COG.
+
+This path is intentionally development/localhost infrastructure. A static
+deployment still uses the coarse global asset until a server-side proxy or
+equivalent authenticated Copernicus delivery is deployed. The UI metadata
+reports which resolution actually supplied the current field.
+
+When Copernicus Data Space credentials are available to the dev server, the
+same-origin adapter also exposes point and raster routes at
+/api/landcover/fractions and /api/landcover/fractions-field. Set
+COPERNICUS_CLIENT_ID and COPERNICUS_CLIENT_SECRET in the server environment;
+the secret never enters the browser. Without those variables the routes return
+an explicit credentials_missing response and the WorldCover path remains the
+active fallback.
+
+## Optional global evidence layer: Copernicus fractional cover
+
+ESA WorldCover supplies the discrete class needed for the current crosswalk,
+but a class label alone does not describe fuel continuity or mixed pixels.
+The official Copernicus Global Dynamic Land Cover 100 m documentation
+(https://documentation.dataspace.copernicus.eu/APIs/SentinelHub/Data/clms/land-cover-and-land-use-mapping/global-dynamic-land-cover/lc_global_100m_yearly_v3.html)
+lists global fractional layers for tree, shrub, grass, crop, bare, moss/lichen,
+and permanent-water cover, alongside a discrete classification. Those
+fractions are a better evidence layer for adjusting local fuel availability
+and identifying mixed water/land cells than an invented biome coefficient.
+
+The product is free/open, but the documented delivery path is a Copernicus
+Data Space BYOC/Sentinel Hub request and requires a free account with OAuth
+client credentials. The localhost app therefore does not silently pretend
+that this layer is present: without credentials it continues to use ESA
+WorldCover and reports field-wide crosswalk quality. When the fractions are
+available, the crosswalk uses the dominant tree/shrub/grass/crop fraction to
+select a corresponding Scott & Burgan approximation and scales fuel
+availability by total mapped vegetation cover. This is intentionally labeled
+low confidence: cover percentage is not measured surface fuel load, the
+2015–2019 product is not a live 2026 fuel observation, and no global
+calibration coefficient is claimed. The explicit 50% permanent-plus-seasonal
+water threshold remains a hard barrier.

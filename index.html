@@ -23,7 +23,7 @@
         </div>
         <div class="guide-block guide-reference">
           <span class="north-marker" aria-label="North">N</span>
-          <span id="guide-scale">128 km field</span>
+          <span id="guide-scale">32 km field</span>
         </div>
       </div>
 
@@ -32,7 +32,13 @@
           <span class="panel-eyebrow">Ignition target</span>
           <span class="panel-index">IGN—01</span>
         </div>
-        <h1 id="location-value">Awaiting selection</h1>
+        <div class="condition-heading">
+          <svg class="target-icon" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+            <circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.3" />
+            <path d="M7 0.6v2.6M7 10.8v2.6M0.6 7h2.6M10.8 7h2.6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+          </svg>
+          <h1 id="location-value">Awaiting selection</h1>
+        </div>
         <dl>
           <div class="field">
             <dt>Latitude</dt>
@@ -59,7 +65,16 @@
           <span class="panel-index">SIM—01</span>
         </div>
         <div class="control-row">
-          <label for="scenario-select">Scenario</label>
+          <label for="scenario-select">
+            <span class="control-row-label-top">
+              <svg class="control-icon" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                <circle cx="7" cy="7" r="1.3" fill="currentColor" />
+                <circle cx="7" cy="7" r="4" stroke="currentColor" stroke-width="1.1" opacity="0.6" />
+                <circle cx="7" cy="7" r="6.2" stroke="currentColor" stroke-width="1.1" opacity="0.32" />
+              </svg>
+              <span>Scenario</span>
+            </span>
+          </label>
           <select id="scenario-select">
             <option value="calm" selected>Calm / radial</option>
             <option value="wind">Wind driven</option>
@@ -68,27 +83,93 @@
           </select>
         </div>
         <div class="control-row">
-          <label for="fuel-select">Fuel</label>
+          <label for="fuel-select">
+            <span class="control-row-label-top">
+              <svg class="control-icon" viewBox="0 0 14 14" fill="currentColor" aria-hidden="true">
+                <path d="M7 1c0 2.3-3 3.9-3 7a3 3 0 0 0 6 0c0-1-.4-1.8-1-2.4.1.9-.4 1.6-1.1 1.6-.8 0-1.3-.8-.9-1.6.6-1.3.3-2.9 0-4.6z" />
+              </svg>
+              <span>Fuel</span>
+            </span>
+          </label>
           <select id="fuel-select">
             <option value="grass">Grassland</option>
             <option value="brush" selected>Brush</option>
             <option value="timber">Timber</option>
           </select>
         </div>
+        <div class="control-divider" aria-hidden="true"></div>
         <div class="control-row range-row">
-          <label for="wind-speed">Wind <output id="wind-speed-value">18 km/h</output></label>
+          <label for="wind-speed">
+            <span class="control-row-label-top">
+              <svg class="control-icon" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                <path d="M1.3 4.6h7a1.7 1.7 0 1 0-1.5-2.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+                <path d="M1.3 7.6h8.6a1.6 1.6 0 1 1-1.4 2.3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+                <path d="M1.3 10.6h5.2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+              </svg>
+              <span>Wind</span>
+            </span>
+            <output id="wind-speed-value">18 km/h</output>
+          </label>
           <input id="wind-speed" type="range" min="0" max="60" step="1" value="18" />
         </div>
         <div class="control-row range-row">
-          <label for="wind-direction">Direction <output id="wind-direction-value">045°</output></label>
+          <label for="wind-direction">
+            <span class="control-row-label-top">
+              <svg class="control-icon" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                <circle cx="7" cy="7" r="5.5" stroke="currentColor" stroke-width="1.1" opacity="0.55" />
+                <path d="M7 2.6l1.7 4.4-1.7-1-1.7 1L7 2.6z" fill="currentColor" />
+              </svg>
+              <span>Direction</span>
+            </span>
+            <output id="wind-direction-value">045°</output>
+          </label>
           <input id="wind-direction" type="range" min="0" max="359" step="1" value="45" />
         </div>
         <div class="control-row range-row">
-          <label for="moisture">Moisture <output id="moisture-value">32%</output></label>
-          <input id="moisture" type="range" min="0" max="100" step="1" value="32" />
+          <label for="moisture">
+            <span class="control-row-label-top">
+              <svg class="control-icon" viewBox="0 0 14 14" fill="currentColor" aria-hidden="true">
+                <path d="M7 1.4s3.4 4.3 3.4 6.8a3.4 3.4 0 1 1-6.8 0c0-2.5 3.4-6.8 3.4-6.8z" />
+              </svg>
+              <span>Moisture</span>
+            </span>
+            <output id="moisture-value">8%</output>
+          </label>
+          <input id="moisture" type="range" min="0" max="100" step="1" value="8" />
+        </div>
+        <label class="weather-moisture-toggle" for="weather-moisture-toggle">
+          <input id="weather-moisture-toggle" type="checkbox" checked />
+          <span>Use weather moisture estimate</span>
+        </label>
+        <label class="weather-moisture-toggle" for="uncertainty-toggle">
+          <input id="uncertainty-toggle" type="checkbox" />
+          <span>Show experimental sensitivity range</span>
+        </label>
+        <div class="control-row range-row">
+          <label for="live-moisture">
+            <span class="control-row-label-top">
+              <svg class="control-icon" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                <path d="M2.2 11.4C1.6 5.8 5.8 1.6 11.4 2.2c.6 5.6-3.6 9.8-9.2 9.2z" fill="currentColor" />
+                <path d="M2.8 10.8L8.6 5" stroke="var(--void)" stroke-width="1" stroke-linecap="round" />
+              </svg>
+              <span>Live moisture</span>
+            </span>
+            <output id="live-moisture-value">60%</output>
+          </label>
+          <input id="live-moisture" type="range" min="0" max="200" step="1" value="60" />
         </div>
         <div class="control-row range-row">
-          <label for="slope-strength">Slope <output id="slope-value">20%</output></label>
+          <label for="slope-strength">
+            <span class="control-row-label-top">
+              <svg class="control-icon" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                <path d="M1.5 11.5h11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+                <path d="M1.5 11.5L9 3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+                <path d="M9 3l2 .1.1 2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+              <span>Slope</span>
+            </span>
+            <output id="slope-value">20%</output>
+          </label>
           <input id="slope-strength" type="range" min="0" max="100" step="1" value="20" />
         </div>
         <div class="simulation-actions">
@@ -105,21 +186,35 @@
           <div><span>Avg rate</span><strong id="spread-rate-value">—</strong></div>
         </div>
         <div class="scenario-metadata" aria-label="Scenario metadata">
-          <div class="metadata-heading">
-            <span>Scenario basis</span>
-            <span id="metadata-state">Awaiting land</span>
+          <button type="button" class="metadata-toggle" id="metadata-toggle" aria-expanded="false" aria-controls="metadata-panel">
+            <span class="metadata-heading-inline">
+              <span>Model provenance</span>
+              <span id="metadata-state">Awaiting land</span>
+            </span>
+            <svg class="chevron" viewBox="0 0 10 6" fill="none" aria-hidden="true">
+              <path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+          <div class="metadata-collapse" id="metadata-panel">
+            <div class="metadata-collapse-inner">
+              <dl class="metadata-list">
+                <div><dt>Model</dt><dd id="model-value">Cellular · 1 min/tick</dd></div>
+                <div><dt>Terrain</dt><dd id="terrain-value">Awaiting land</dd></div>
+                <div><dt>Water</dt><dd id="water-basis-value">WorldCover + Earth texture</dd></div>
+                <div><dt>Elevation</dt><dd id="elevation-value">—</dd></div>
+                <div><dt>Fuel</dt><dd id="fuel-basis-value">Brush · 1.00</dd></div>
+                <div><dt>Wind</dt><dd id="wind-basis-value">000° · 0 km/h</dd></div>
+                <div><dt>Dead moisture</dt><dd id="moisture-basis-value">8%</dd></div>
+                <div><dt>Live moisture</dt><dd id="live-moisture-basis-value">60%</dd></div>
+                <div><dt>Slope</dt><dd id="slope-basis-value">0%</dd></div>
+                <div><dt>Scale</dt><dd id="scale-value">—</dd></div>
+                <div><dt>Field quality</dt><dd id="fuel-field-quality-value">Awaiting local field</dd></div>
+                <div><dt>Seed</dt><dd id="seed-value">17</dd></div>
+                <div><dt>Range</dt><dd id="uncertainty-basis-value">Deterministic</dd></div>
+                <div><dt>Evidence profile</dt><dd id="evidence-profile-value">Awaiting location</dd></div>
+              </dl>
+            </div>
           </div>
-          <dl class="metadata-list">
-            <div><dt>Model</dt><dd id="model-value">Cellular · 1 min/tick</dd></div>
-            <div><dt>Terrain</dt><dd id="terrain-value">Awaiting land</dd></div>
-            <div><dt>Elevation</dt><dd id="elevation-value">—</dd></div>
-            <div><dt>Fuel</dt><dd id="fuel-basis-value">Brush · 1.00</dd></div>
-            <div><dt>Wind</dt><dd id="wind-basis-value">000° · 0 km/h</dd></div>
-            <div><dt>Moisture</dt><dd id="moisture-basis-value">32%</dd></div>
-            <div><dt>Slope</dt><dd id="slope-basis-value">0%</dd></div>
-            <div><dt>Scale</dt><dd id="scale-value">—</dd></div>
-            <div><dt>Seed</dt><dd id="seed-value">17</dd></div>
-          </dl>
         </div>
         <div class="interpretation-block">
           <span class="metadata-heading">Interpretation</span>
@@ -127,7 +222,7 @@
           <span id="direction-value">Spread direction · —</span>
         </div>
         <div class="model-disclaimer">
-          Educational cellular model · not a forecast
+          Rothermel surface model · not a forecast
         </div>
         <section class="run-history" aria-label="Recent simulation runs">
           <div class="metadata-heading">
@@ -139,7 +234,7 @@
           </div>
         </section>
         <p class="terrain-attribution">Terrain: Copernicus GLO-90 via Open-Meteo · global, coarse-scale elevation</p>
-        <p class="simulation-note">Synthetic educational model · 1 min/tick · terrain loads on ignition</p>
+        <p class="simulation-note">Rothermel surface model · 1 min/tick · terrain loads on ignition</p>
       </section>
     </div>
     <script type="module" src="/src/main.js"></script>
