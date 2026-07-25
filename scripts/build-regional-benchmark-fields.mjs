@@ -14,7 +14,7 @@
 // Chosen over Open-Meteo's elevation API (which itself just proxies
 // Copernicus GLO-90, 3x coarser) because Open-Meteo's free tier hit a daily
 // request quota; S3 static-object reads have no such quota.
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -453,9 +453,18 @@ async function buildCaseFields(caseDef) {
   };
 }
 
+// --only id1,id2 restricts which cases are (re)built this run. Omitted, the
+// script behaves exactly as before (builds every case, full overwrite) --
+// this flag exists so new benchmark cases can be added without re-fetching
+// (and risking non-identical re-fetches for) the existing frozen cases,
+// since RUN history depends on those staying byte-identical.
+const onlyArgIndex = process.argv.indexOf('--only');
+const onlyIds = onlyArgIndex >= 0 ? process.argv[onlyArgIndex + 1].split(',') : null;
+const selectedCases = onlyIds ? CASES.filter((c) => onlyIds.includes(c.id)) : CASES;
+
 async function main() {
   const results = [];
-  for (const caseDef of CASES) {
+  for (const caseDef of selectedCases) {
     process.stderr.write(`building fields for ${caseDef.id}...\n`);
     const fields = await buildCaseFields(caseDef);
     results.push(fields);
@@ -463,9 +472,18 @@ async function main() {
     await sleep(3000);
   }
   const outPath = new URL('../src/lib/regionalBenchmarkFields.generated.json', import.meta.url);
-  writeFileSync(outPath, JSON.stringify(results, null, 2));
-  const fullyAvailable = results.filter((r) => r.terrain.available && r.fuel.available && r.weather.available).length;
-  process.stderr.write(`wrote ${results.length} case field records (${fullyAvailable} with all 3 fields real) to ${outPath.pathname}\n`);
+  let finalResults = results;
+  if (onlyIds) {
+    // Merge into the existing frozen file rather than overwrite it: keep
+    // every case not in --only byte-identical, replace/add only the
+    // requested ones.
+    const existing = JSON.parse(readFileSync(outPath, 'utf8'));
+    const keep = existing.filter((entry) => !onlyIds.includes(entry.id));
+    finalResults = [...keep, ...results];
+  }
+  writeFileSync(outPath, JSON.stringify(finalResults, null, 2));
+  const fullyAvailable = finalResults.filter((r) => r.terrain.available && r.fuel.available && r.weather.available).length;
+  process.stderr.write(`wrote ${finalResults.length} case field records (${fullyAvailable} with all 3 fields real) to ${outPath.pathname}\n`);
 }
 
 main();

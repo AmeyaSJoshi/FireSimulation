@@ -187,3 +187,46 @@ Baseline reproduced exactly across two independent runs (meanIoU 0.0996, freeBur
 Spotting wiring is retained but defaults OFF. The module is correct and sourced; it simply is not the binding constraint.
 
 **Discovered while doing this, not yet fixed:** both crown fire and spotting gate on `canopyBulkDensityByCell`, which only LANDFIRE (US-only) populates. Both mechanisms are therefore silently inert **everywhere outside the United States** -- and a 6-US-fire benchmark structurally cannot detect it. See RUN-021.
+
+## 2026-07-25 update 12 (Claude) -- active-burn-window diagnosis: null result, no implementation
+
+RUN-021 left the model over-predicting (recall 0.6504 vs precision 0.1780, ~3.6x too much area burned) and flagged calendar-window duration as the suspected dominant error: each benchmark case runs its full alarm-to-containment window (big-five-2015 = 138 days, oregon-gulch-2014 = 14 days) even though real fires make major runs on only a handful of extreme-weather days. Before writing any code, diagnosed the size of that effect using the archived weather already frozen in `regionalBenchmarkFields.generated.json`.
+
+Defined "active hour" exactly as specified: dead fuel moisture below the fuel's moisture-of-extinction AND non-trivial wind. Computed it directly with `calculateSurfaceSpread()` itself (not a reimplementation) against every burnable fuel code in each case's real WorldCover/LANDFIRE fuel mix, area-weighted by cell count, across every hour of each case's archived `windTimeline`.
+
+| case | total hours | active hours | active % |
+|---|---|---|---|
+| reservoir-2016 | 120 | 120.0 | 100.0% |
+| deer-2016 | 96 | 96.0 | 100.0% |
+| oregon-gulch-2014 | 360 | 337.8 | 93.8% |
+| big-five-2015 | 3336 | 2688.4 | 80.6% |
+| dinely-2017 | 120 | 109.3 | 91.1% |
+| stoll-2018 | 24 | 24.0 | 100.0% |
+
+The "non-trivial wind" clause never disqualified a single hour -- the archived midflame wind is essentially never near zero (minimum 0.2 km/h across all 6 timelines; only 1 of 4046 total hourly samples is <=0.01 km/h). So the rule collapsed to the moisture side alone, and Scott & Burgan moisture-of-extinction thresholds (0.15-0.35) are generous enough that dead fuel moisture rarely reaches them even overnight in this archive.
+
+**More importantly: this is not a new lever.** `surfaceSpread.js:249-251` already zeroes the spread rate whenever characteristic dead moisture is at or above the fuel's extinction moisture, driven every timestep by the exact same `weatherTimeline`. `firePropagation.js:803-833` -- the `waitedMinutes`/persistence-budget segment loop added in RUN-018 -- already walks past every zero-rate window on every edge without advancing arrival distance, and only accumulates positive-rate minutes. An active-burn-window solve already runs continuously in the solver; it was never gated on calendar time in the first place.
+
+**Verdict: NULL RESULT, no implementation forced**, per the explicit instruction that a small measured effect should be reported honestly rather than built anyway. Building a separate active-window pre-filter using this rule would duplicate existing physics-driven behavior for at most a ~19% time reduction in one case (big-five) and 0% in three of the six. The true driver of the 3.6x over-prediction is that Rothermel's no-wind-no-slope creeping rate runs through nearly the entire multi-week/multi-month window whenever moisture merely stays under a generous extinction threshold -- a persistence real fires evidently do not have (patchy fuel continuity, local wind lulls the ~31 km ERA5/Open-Meteo grid cannot resolve, fire-danger-day clustering), none of which a coarse moisture/wind gate on reanalysis data can capture without inventing a coefficient or hand-picking per-case durations, both disallowed by project law. No files changed; no fudge substituted for the ruled-out threshold. Suppression (blocked, RUN-019/019b) and weather resolution beyond ERA5 (also ruled out, RUN-016) remain the most credible remaining levers -- this run rules out a third. See RUN-022 in `RESULTS.jsonl`.
+
+## 2026-07-25 update 13 (Claude) -- benchmark expanded, FIRMS discovered, and the crown-fire headline corrected
+
+Three results, in ascending order of importance.
+
+**1. Measurement was the binding constraint, not modelling.** The free-burning tier was a 2-sample statistic (deer-2016, oregon-gulch-2014), too small to distinguish a real improvement from noise. Added three large minimally-suppressed wilderness fires from the WFIGS Interagency Fire Perimeter History layer under a new `expansion` split -- rough-2015 (151,546 ac), trinity-ridge-2012 (146,742 ac), chips-2012 (76,350 ac) -- with real weather/fuel/terrain/canopy fetched for all three. The split is deliberately excluded from the default splits so the original six-case aggregate stays byte-identical and all prior runs remain comparable (verified: still exactly 0.0996 / 0.1918 / 0.0535).
+
+| fire | IoU | precision | recall | area |
+|---|---|---|---|---|
+| trinity-ridge-2012 | 0.378 | 0.385 | 0.953 | 2.47x |
+| chips-2012 | 0.307 | 0.318 | 0.900 | 2.83x |
+| rough-2015 | 0.303 | 0.311 | 0.927 | 2.98x |
+
+**With no model change at all, the model scores 0.30-0.38 on its intended regime** -- across all five free-burning fires roughly **0.274 IoU, not 0.192**. The two-case estimate was pessimistic. The residual error on these is a consistent, tractable ~2.5-3x area over-prediction with 90-95% recall, not the 36-225x seen on suppressed fires.
+
+**2. NASA FIRMS is reachable with no API key**, giving dated active-fire detection coordinates globally from 2012 (`firms.modaps.eosdis.nasa.gov/data/country/viirs-snpp/{year}/...`). This is a coarse form of the perimeter-progression data RUN-019/019b concluded was unreachable. Deriving a per-fire 95%-growth window (the day cumulative detection-cloud extent reaches 95% of final) and substituting it for the alarm-to-containment calendar span improves both tiers as one uniform rule, no per-case tuning: meanIoU 0.0996 -> **0.1322** (+33%), freeBurning 0.1918 -> **0.2241**, suppressionConfounded 0.0535 -> **0.0863**. deer-2016 0.145 -> 0.433, dinely 0.020 -> 0.132, reservoir 0.003 -> 0.022. It is crude, however -- it destroys oregon-gulch -- so it is committed as a reproducible experiment (`scripts/firms-growth-window.py`, `scripts/firms-modeltime-experiment.mjs`) rather than written into the fixtures.
+
+**3. CORRECTION -- the crown-fire headline was substantially an artifact.** RUN-018 reported crown fire taking oregon-gulch from IoU 0.016 -> 0.239 as the project's largest accuracy win, and the README repeated it. FIRMS shows the real fire did 95% of its growth in **3 days**, from 1,565 detections (dense, not a sparse-sample artifact), against the 15-day calendar window the model was given. Given its true 3-day window the model reaches **1% of observed area** -- it needs ~15 days to cover what the fire covered in 3, so its spread **rate** is ~5x too slow (~1.55 m/min required omnidirectionally, ~0.29 m/min peak head rate available). **RUN-017's original verdict that oregon-gulch is structurally impossible for this model was correct, and crown fire did not overturn it**; a 5x-too-slow rate paired with a 5x-too-long window merely made the total area look right. Crown fire remains a real and necessary mechanism -- it is the headline number that was overstated. README updated accordingly.
+
+**Spotting, re-tested and settled.** Hypothesis: spotting hurt earlier only because windows were too long, so with corrected FIRMS windows a now-too-slow model should benefit. Measured 2x2 -- calendar+off 0.1918, calendar+on 0.1517, FIRMS+off 0.2241, FIRMS+on 0.1659. **Spotting hurt under both conditions, and did not move oregon-gulch at all** (0.015 -> 0.015). Hypothesis disproven; treat spotting as settled and leave the flag off.
+
+The remaining gap on extreme fires is a factor-of-5 deficit in spread **rate**, not a missing mechanism. Wind is the leading suspect: ERA5 (~31 km) and RTMA (2.5 km) disagree by up to 127 degrees in direction and 4.3x in speed over one oregon-gulch afternoon, but RTMA is US-only and a full-window ingest is ~20 GB, so it is untested. See RUN-023.

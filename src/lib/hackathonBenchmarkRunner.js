@@ -201,9 +201,15 @@ export function runConusHackathonBenchmarks({
   requireFiniteInRange('liveMoistureFraction', liveMoistureFraction, 0, 2);
   requireFiniteInRange('midflameWindKmh', midflameWindKmh, 0);
   requireFiniteInRange('fuelLoadScale', fuelLoadScale, 0, 1);
+  // 'expansion' holds fires added to grow the free-burning-comparable sample
+  // beyond its original 2-case size (see docs/regional-model-run/THREAD.md).
+  // It is never included in the default splits list, so callers that don't
+  // pass `splits` explicitly are unaffected and the original 6-case
+  // calibration/holdout aggregates stay exactly as they were.
+  const VALID_SPLITS = ['calibration', 'holdout', 'expansion'];
   if (!Array.isArray(splits) || splits.length === 0
-    || splits.some((split) => split !== 'calibration' && split !== 'holdout')) {
-    throw new RangeError('hackathonBenchmarkRunner: splits must contain calibration and/or holdout');
+    || splits.some((split) => !VALID_SPLITS.includes(split))) {
+    throw new RangeError('hackathonBenchmarkRunner: splits must contain calibration, holdout, and/or expansion');
   }
   const selectedDefinitions = HACKATHON_BENCHMARK_DEFINITIONS
     .filter((definition) => splits.includes(definition.split));

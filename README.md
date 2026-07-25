@@ -70,19 +70,49 @@ Tier assignment uses **observed final area only** (< 2 km² ceiling) and never
 reads model output, so it cannot be tuned to flatter a result. Nothing is
 excluded — both tiers are reported alongside the blended figure.
 
-Biggest win so far: crown fire took oregon-gulch-2014 (35,111 acres) from IoU
-0.016 → **0.239**, a fire previously proven *mathematically impossible* for a
-surface-only model.
+**An `expansion` split (RUN-023) adds three large free-burning wilderness
+fires**, kept out of the default splits so the six-case numbers above stay
+comparable across all prior runs:
+
+| fire | acres | IoU | recall |
+|---|---|---|---|
+| trinity-ridge-2012 | 146,742 | 0.378 | 0.953 |
+| chips-2012 | 76,350 | 0.307 | 0.900 |
+| rough-2015 | 151,546 | 0.303 | 0.927 |
+
+**On its intended regime the model is at roughly 0.27 IoU across five
+free-burning fires, not the 0.19 the two-case tier implied** — recall 0.90–0.95,
+with a consistent ~2.5–3× area over-prediction. The two-case estimate was
+pessimistic; adding cases changed the number without changing the model.
+
+### Correction: the crown-fire claim (RUN-023)
+
+Earlier versions of this file cited crown fire taking oregon-gulch-2014 from IoU
+0.016 → 0.239 as the project's largest accuracy win. **That was substantially an
+artifact of compensating errors.** NASA FIRMS satellite detections (1,565 of
+them — dense and trustworthy) show the real fire did 95% of its growth in
+**3 days**, not the 15-day alarm-to-containment span the model was given. Given
+its true 3-day window the model reaches **1% of the observed area**: it needs
+~15 days to cover what the fire covered in 3, so its spread *rate* is roughly
+**5× too slow** (~1.55 m/min required, ~0.29 m/min peak head rate available).
+
+RUN-017's original verdict — that oregon-gulch is structurally impossible for
+this model — was correct, and crown fire did not overturn it. A 5×-too-slow rate
+paired with a 5×-too-long window merely made the total area look right. Crown
+fire remains a real and necessary mechanism; it is the *headline number* that
+was overstated.
 
 ## Known limitations (deliberate, not TODOs)
 
 1. **No suppression model.** No reachable dated perimeter-progression data
    source exists — verified across multiple sources and networks (RUN-019/019b).
    This is why small contained fires are overpredicted.
-2. **Spotting / ember transport not wired in.** `src/lib/spotting.js` exists and
-   is tested but is NOT connected to the solver. It contains one **invented
-   constant** (`LOFT_HEIGHT_TO_FLAME_LENGTH_RATIO = 30`), labelled as such —
-   being replaced with a sourced plume-rise formulation.
+2. **Spotting measured as harmful — considered settled.** `src/lib/spotting.js`
+   (ELMFire empirical, sourced) is wired into the solver but **defaults OFF**.
+   It was measured twice under opposite conditions and hurt both times: with
+   calendar windows (free-burning 0.192 → 0.152) and again with corrected FIRMS
+   windows (0.224 → 0.166). It does not move oregon-gulch at all. Embers are not
+   this model's binding constraint.
 3. **No plume / fire-atmosphere coupling.**
 4. **ERA5 at ~31 km** cannot resolve local wind events that drive real runs.
    HRRR was checked and has zero coverage for these 2014–2018 dates.
@@ -139,8 +169,26 @@ Don't re-derive past results — grep these first:
 
 ## Next step
 
-Wire spotting into `firePropagation.js` as deterministic long-range downwind
-graph edges (never random ignitions — the solver is deterministic and every
-benchmark comparison depends on that). Plan: `docs/spotting-implementation-plan.md`.
-Judge it on the free-burning tier; the suppression-confounded tier will get
-worse, which is expected.
+**The remaining gap on large fires is spread RATE, not a missing mechanism.**
+Matching oregon-gulch needs ~1.55 m/min sustained omnidirectional spread; the
+model's peak head rate is ~0.29 m/min. Adding more spread-producing mechanisms
+has now been measured as counterproductive twice (spotting), so the lever is
+whatever makes the existing physics run faster and in the right direction.
+Leading suspect: **wind**. ERA5's ~31 km grid was compared against RTMA's 2.5 km
+for oregon-gulch and they disagree by up to **127° in direction and 4.3× in
+speed** within one afternoon — but RTMA is US-only and a full-window ingest is
+~20 GB, so this remains untested.
+
+Also open, in rough value order:
+
+- **FIRMS growth windows** (`scripts/firms-growth-window.py`) improve both tiers
+  (+33% meanIoU) but destroy oregon-gulch, so they are kept as a reproducible
+  experiment rather than written into the fixtures. A less crude rule — e.g.
+  only applying them where detections are dense — may capture the gain without
+  the loss.
+- **Crown fire and spotting are both inert outside the US** — both gate on
+  `canopyBulkDensityByCell`, which only LANDFIRE populates. A global canopy bulk
+  density was investigated and found NOT derivable from the FCCS fuelbed (it
+  carries cover, height, and crown base height, but no crown biomass load).
+- **More free-burning benchmark cases.** Adding three changed the measured
+  accuracy from 0.19 to 0.27 with no model change; the sample is still small.
