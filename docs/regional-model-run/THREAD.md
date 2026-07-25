@@ -165,3 +165,25 @@ With suppression closed as a disclosed limitation, the remaining problem is that
 Headline `meanIoU` stays exactly 0.0996 and every case is still scored -- nothing is excluded or hidden. What changes is interpretability: on the fires the model genuinely attempts, IoU is roughly double the blended number, and the precision collapse is localised to the confounded tier, quantitatively confirming update 8's diagnosis. Going forward, spread-physics work should be judged primarily on the `freeBurningComparable` tier; movement in the confounded tier says little about spread until a suppression mechanism exists. 343/343 tests pass (additive change, no existing field altered). See RUN-020 in `RESULTS.jsonl`.
 
 A project-root `CLAUDE.md` was also added this session recording measured context-bomb file sizes, safe query patterns for them, the curl-vs-node-fetch requirement, and the settled findings future sessions should not re-derive.
+
+## 2026-07-25 update 11 (Claude) -- spotting implemented, measured, and found NOT to help; the model now over-predicts
+
+Built ember/spotting transport and measured it. Three routes were tried before one was usable: an AI-invented loft-height ratio (rejected outright); Albini (1979) mechanistic spotting, a dead end because loft height is governed by firebrand **diameter**, not fire intensity, and no published closed form relates ember diameter to intensity -- so spot distance *fell* as intensity rose; and finally ELMFire's empirical model (Lautenberger), `E[dX] = a*I^b*U^c` with a=5.0, b=0.3, c=0.7, sourced from `docs/user_guide/spotting.rst` and cross-checked against ELMFire's own Fortran. That last is monotonic in both intensity and wind and is the operative path. Wired into `firePropagation.js` as **deterministic** long-range downwind graph edges -- never random ignitions, since the solver is Dijkstra and every benchmark comparison depends on reproducibility -- behind a flag defaulting OFF.
+
+Baseline reproduced exactly across two independent runs (meanIoU 0.0996, freeBurning 0.1918, suppressionConfounded 0.0535), confirming the flag defaults off cleanly.
+
+| variant | meanIoU | freeBurningComparable |
+|---|---|---|
+| baseline (spotting off) | 0.0996 | 0.1918 |
+| single landing cell | 0.0943 | 0.1797 (-0.0121) |
+| multi-cell landing | 0.0840 | **0.1517 (-0.0402)** |
+
+**Spotting hurts, and the multi-cell "fix" hurt about 3x more.** Reported as-is, nothing tuned.
+
+**The diagnostic is recall.** Seeding embers across a full distance range added **+0.0009** recall while costing **-0.0213** precision -- essentially every spot fire landed where the real fire never went.
+
+**Structural conclusion, and it redirects the roadmap:** this model no longer under-predicts spread, it **over-predicts** it. Recall 0.65 against precision 0.18 means roughly 3.6x too much area burned. Crown fire succeeded precisely because the model was genuinely too small on large fires; that deficit is now closed. It follows that *any* further spread-**adding** mechanism -- spotting, plume coupling -- must make accuracy worse until precision improves. The next productive lever **constrains** spread rather than adding it: suppression (blocked, RUN-019/019b), model-duration accuracy, or fuel/moisture precision.
+
+Spotting wiring is retained but defaults OFF. The module is correct and sourced; it simply is not the binding constraint.
+
+**Discovered while doing this, not yet fixed:** both crown fire and spotting gate on `canopyBulkDensityByCell`, which only LANDFIRE (US-only) populates. Both mechanisms are therefore silently inert **everywhere outside the United States** -- and a 6-US-fire benchmark structurally cannot detect it. See RUN-021.

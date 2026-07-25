@@ -14,5 +14,6 @@ console.log(JSON.stringify(runConusHackathonBenchmarks({
   deadMoistureFraction: numericArgument('--dead-moisture', 0.05, 0, 1),
   liveMoistureFraction: numericArgument('--live-moisture', 0.5, 0, 2),
   midflameWindKmh: numericArgument('--wind-kmh', 0),
-  fuelLoadScale: numericArgument('--fuel-scale', 1, 0, 1)
+  fuelLoadScale: numericArgument('--fuel-scale', 1, 0, 1),
+  enableSpotting: process.argv.includes('--enable-spotting')
 }), null, 2));

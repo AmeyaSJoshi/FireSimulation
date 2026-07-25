@@ -45,51 +45,60 @@
 //      flightTime (min) = charact_t * travelTime
 //    where z is the maximum firebrand lofting height (meters).
 //
-// WHAT WE COULD NOT SOURCE (read before trusting maxSpotDistanceMeters)
+// FIREBRAND LOFTING HEIGHT — z(firebrand diameter), Albini (1979)
 // -----------------------------------------------------------------------
 // Albini's full model derives z from a coupled flame/plume-rise submodel
-// that also depends on firebrand size distribution and empirical
-// burning-rate correlations for wood cylinders in cross-flow. We could not
-// confidently source those coefficients — they are not a simple closed
-// form, and even the pyretechnics port hardcodes a single worked-example
-// value (z = 117 m) and separately marks its own general lofting-height
-// formula ("albini_firebrand_maximum_height") FIXME/unused.
+// that depends on firebrand size (diameter) and empirical burning-rate
+// correlations for wood cylinders/disks in cross-flow. The original GTR
+// INT-56 equations for that submodel are not machine-extractable in this
+// environment, but the pyretechnics reimplementation (spot_fire.py)
+// preserves Albini's closed-form MAXIMUM lofting height as a direct
+// function of firebrand diameter:
 //
-// PHYSICS DEFECT FOUND AND FIXED (see git history / CLAUDE.md handoff for
-// the full writeup): treating that worked-example 117 m as a fixed default
-// for every fire made maxSpotDistanceMeters DECREASE as fireline intensity
-// increased. Root cause, algebraically: in the D43 formula, u = (b + z/L)/A.
-// When z is held ~constant while flame length L grows with intensity, z/L
-// shrinks, so u shrinks, so travelTime = 1.2 + (A/3)(u^1.5 - 1) shrinks —
-// and that shrinkage outpaces the growth of the characteristic time term
-// (which scales as sqrt(L)). Net effect: bigger fires produced *shorter*
-// flight times and spot distances, which is physically backwards (bigger
-// fires loft embers higher and spot farther — that is the entire spotting
-// mechanism). This is not merely a units bug; it is structural to using a
-// near-constant z regardless of L.
+//   function albini_firebrand_maximum_height(firebrand_diameter):
+//     return 0.39e5 * firebrand_diameter
 //
-// We could not source a general closed-form z(intensity) from Albini 1979
-// (see above). Rather than invent a formula and present it as sourced, this
-// module now derives z from flame length using a single transparent,
-// EXPLICITLY UNSOURCED scaling constant:
-//   z = max(canopyHeightMeters + flameLengthMeters,
-//           LOFT_HEIGHT_TO_FLAME_LENGTH_RATIO * flameLengthMeters)
-// LOFT_HEIGHT_TO_FLAME_LENGTH_RATIO (= 30, dimensionless) is NOT derived
-// from Albini or any other cited source. It was chosen only to satisfy two
-// requirements: (1) z must grow at least proportionally with flame length
-// so u does not collapse as intensity rises (this is what makes flight
-// time — and thus spot distance — monotonically increasing in intensity,
-// which is the physically required behavior), and (2) it should not force
-// unrealistically small or large lofting heights across the fireline
-// intensities this module is meant to be used at (roughly 200-90,000
-// kW/m). Treat maxSpotDistanceMeters as an order-of-magnitude estimate,
-// not a validated absolute distance. The old 117 m constant is preserved
-// below as DEFAULT_MAX_LOFT_HEIGHT_METERS purely as the documented Albini
-// worked-example reference value (used in tests that check the flight-time
-// equation implementation itself) — it is no longer used as the default
-// lofting height inside computeSpotting.
+// i.e. z (m) = 39000 * D (m), where D is firebrand (disk/cylinder)
+// diameter in meters. This is sourced from the pyretechnics
+// REIMPLEMENTATION, not the original Albini 1979 GTR text (which we could
+// not machine-read) — pyretechnics itself marks the function "# FIXME:
+// unused" in its own spread_firebrands pipeline (it uses a fixed z = 117 m
+// worked-example constant in albini_t_max instead), but the formula and
+// its D33/D43-context are presented as Albini's, and 117 m is exactly what
+// this formula reproduces at D = 0.003 m (3 mm) — 0.39e5 * 0.003 = 117 —
+// which cross-checks the formula against the one concrete number both this
+// project and pyretechnics were previously hardcoding.
+//
+// Firebrand diameter is now an explicit input (`firebrandDiameterMeters`),
+// defaulting to DEFAULT_FIREBRAND_DIAMETER_METERS = 0.003 m (3 mm). This
+// default is chosen ONLY because it reproduces the 117 m Albini
+// worked-example reference value via the sourced formula above — it is NOT
+// independently sourced as "the" typical firebrand diameter. Wildland fire
+// literature commonly discusses firebrand diameters on the order of
+// 1-10 mm, but that range was not independently verified against a
+// specific citation in this pass and should be treated as an unsourced
+// plausibility note, not a validated bound. Callers with a fire/fuel-type-
+// specific firebrand size estimate should pass `firebrandDiameterMeters`
+// explicitly (or `maxLoftHeightMeters` directly, see below).
+//
+// PHYSICS PROPERTY: with z governed by ember size rather than fire
+// intensity, z is roughly CONSTANT across fires with the same firebrand
+// diameter, while flame length L grows with intensity. In the Albini D43
+// formula, u = (b + z/L)/a: as L grows with a near-constant z, z/L shrinks,
+// so u shrinks, so travelTime = 1.2 + (a/3)(u^1.5 - 1) shrinks — and for
+// large enough L this can outpace the growth of the characteristic-time
+// term (which scales as sqrt(L)). This module previously "fixed" that by
+// inventing a constant (LOFT_HEIGHT_TO_FLAME_LENGTH_RATIO = 30) forcing z
+// to scale with L so spot distance stayed monotonic in intensity. That
+// constant has been REMOVED — it was not sourced from Albini or any other
+// citation. With the sourced ember-diameter-based z, maxSpotDistanceMeters
+// is NOT guaranteed to be monotonically increasing in fireline intensity;
+// see spotting.test.js for what was verified instead. Treat
+// maxSpotDistanceMeters as an order-of-magnitude estimate, not a validated
+// absolute distance.
 //   - callers may still override the lofting height entirely via
-//     `maxLoftHeightMeters` when a fire-specific value is available;
+//     `maxLoftHeightMeters` when a fire-specific value is available; this
+//     takes precedence over firebrandDiameterMeters;
 //   - the floor of (canopy top + flame length) is kept using ordinary
 //     geometry (an ember cannot loft to less than the height its own flame
 //     reaches above the canopy) — this floor is our own transparent
@@ -111,6 +120,138 @@
 
 export const SPOTTING_VERSION = 'albini-1979-flight-time-0.1.0';
 
+// =========================================================================
+// ELMFIRE EMPIRICAL SPOTTING-DISTANCE MODEL — THIS IS THE OPERATIVE PATH
+// =========================================================================
+//
+// WHY: the Albini (1979) mechanistic model above is retained for reference
+// only. Its lofting height z is governed by firebrand DIAMETER, not fire
+// intensity (see the long header comment above and the non-monotonicity
+// test in spotting.test.js) — no published closed form was found relating
+// ember diameter to fire intensity (checked: Sardoy et al., pyretechnics,
+// and general web search), so the Albini path can produce spot distance
+// that DECREASES as fireline intensity increases, which is physically
+// backwards for routing/graph-edge use. ELMFire's empirical model is
+// monotonic in both intensity and wind by construction, so it is used here
+// as the operative estimator instead.
+//
+// FORMULA (Lautenberger, ELMFIRE — github.com/lautenberger/elmfire):
+//   E[dX] = a * I^b * U^c        (expected/mean downwind spot distance)
+//   Var[dX] = d * E[dX]          (not used here; see determinism note below)
+// where I = Byram fireline intensity, U = 20-ft wind speed, and a, b, c, d
+// are empirical coefficients named in ELMFire's &SPOTTING namelist as
+// MEAN_SPOTTING_DIST (a), SPOT_FLIN_EXP (b), SPOT_WS_EXP (c), and
+// NORMALIZED_SPOTTING_DIST_VARIANCE (d).
+//
+// SOURCE OF THE FORMULA STRUCTURE:
+//   - github.com/lautenberger/elmfire, build/source/elmfire_spotting.f90,
+//     subroutine SPOTTING, lines ~65-67:
+//       MSD = MAX(MEAN_SPOTTING_DIST*(FLIN**SPOT_FLIN_EXP)*(WS20_NOW**SPOT_WS_EXP), 1.0)
+//       MU_DIST    = LOG(MSD*MSD / SQRT(MSD * NORMALIZED_SPOTTING_DIST_VARIANCE + MSD*MSD))
+//       SIGMA_DIST = SQRT(LOG(1. + MSD * NORMALIZED_SPOTTING_DIST_VARIANCE / (MSD*MSD)))
+//     i.e. MSD is exactly E[dX] = a*I^b*U^c, and the lognormal is
+//     moment-matched from mean MSD and variance MSD*d.
+//   - Confirmed independently in the official docs,
+//     github.com/lautenberger/elmfire, docs/user_guide/spotting.rst
+//     (rendered at elmfire.io/user_guide/spotting.html), which states the
+//     same formula in math notation: m = a*Qdot'^b*u20^c, v = m*d.
+//
+// SOURCE OF THE NUMERIC VALUES USED HERE (a, b, c, d):
+//   docs/user_guide/spotting.rst, lines 18-34, "Shown below is a sample
+//   spotting configuration":
+//     MEAN_SPOTTING_DIST                = 5.0
+//     SPOT_FLIN_EXP                     = 0.3
+//     SPOT_WS_EXP                       = 0.7
+//     NORMALIZED_SPOTTING_DIST_VARIANCE = 250.0
+//   IMPORTANT CAVEAT: these are ELMFire's documented SAMPLE/reference
+//   configuration values, not universal physical constants — the same docs
+//   describe these four parameters as calibration coefficients that
+//   ELMFire normally tunes per-fire via STOCHASTIC_SPOTTING/CALIBRATION
+//   mode against observed perimeters. We checked whether the *compiled-in*
+//   Fortran fallback defaults (elmfire_namelists.f90, READ_SPOTTING
+//   subroutine) were a better-sourced alternative: SPOT_FLIN_EXP=0.5,
+//   SPOT_WS_EXP=0.9 do have nonzero fallbacks there, but MEAN_SPOTTING_DIST
+//   and NORMALIZED_SPOTTING_DIST_VARIANCE both default to 0.0 in that same
+//   subroutine (i.e. spotting is a no-op unless the user supplies a and d
+//   explicitly) — confirmed by checking ELMFire's own example configs
+//   (verification/03-spotting/elmfire.data.in and
+//   tutorials/05-UMD-spotting/elmfire.data.in), neither of which sets
+//   MEAN_SPOTTING_DIST or NORMALIZED_SPOTTING_DIST_VARIANCE at all. So the
+//   compiled-in fallback is not usable as "the" default either. We use the
+//   documented sample configuration (a=5.0, b=0.3, c=0.7, d=250.0) because
+//   it is the only complete, published, non-zero, citable set of all four
+//   coefficients found in ELMFire's own materials.
+//
+// UNITS (confirmed from ELMFire's own docs, not assumed):
+//   - I (fireline intensity) is in kW/m — SI. Source:
+//     docs/user_guide/spotting.rst, line 118-119: "CRITICAL_SPOTTING_
+//     FIRELINE_INTENSITY ... is the fireline intensity in units of kW/m".
+//   - U (20-ft wind speed) is in MPH, not m/s or km/h. Source:
+//     docs/user_guide/io.rst, line 87: "WS_FILENAME: 20-ft wind speed in
+//     mph". This module's midflameWindKmh input is converted to mph before
+//     applying the exponent (see MPH_PER_KMH below) specifically because
+//     of this sourced unit requirement — do not remove that conversion.
+//
+// DETERMINISM: this project's solver is Dijkstra-based and benchmark
+// comparisons depend on determinism, so only E[dX] (the lognormal MEAN) is
+// implemented below. ELMFire itself samples a random distance from the
+// lognormal(mu, sigma) distribution per ember; we deliberately do NOT do
+// that here. Var[dX]/d is documented above for completeness but is not
+// consumed by any function in this file.
+// =========================================================================
+
+// a = MEAN_SPOTTING_DIST, ELMFire sample &SPOTTING config (spotting.rst).
+const ELMFIRE_DOWNWIND_DISTANCE_MEAN = 5.0;
+// b = SPOT_FLIN_EXP, ELMFire sample &SPOTTING config (spotting.rst).
+const ELMFIRE_FLIN_EXPONENT = 0.3;
+// c = SPOT_WS_EXP, ELMFire sample &SPOTTING config (spotting.rst).
+const ELMFIRE_WS_EXPONENT = 0.7;
+// d = NORMALIZED_SPOTTING_DIST_VARIANCE, ELMFire sample &SPOTTING config
+// (spotting.rst). Not consumed here (see DETERMINISM note above); exported
+// only so the sourced value is visible/citable to callers who need Var[dX].
+export const ELMFIRE_DOWNWIND_VARIANCE_MEAN_RATIO = 250.0;
+
+export const ELMFIRE_SPOTTING_VERSION = 'elmfire-empirical-mean-0.1.0';
+
+// Sourced unit conversion (not fire-specific): 1 km/h = 0.621371 mph.
+const MPH_PER_KMH = 0.621371;
+
+/**
+ * ELMFire (Lautenberger) empirical expected downwind spot-fire distance,
+ * E[dX] = a * I^b * U^c. THIS IS THE OPERATIVE spotting-distance estimator
+ * for this project (see module header for why the Albini path above is
+ * reference-only). Deterministic: returns the lognormal distribution's
+ * MEAN, never a sampled/random draw.
+ *
+ * Monotonic in both firelineIntensityKwPerM and midflameWindKmh by
+ * construction (both exponents b, c > 0), unlike the Albini path.
+ *
+ * @param {object} params
+ * @param {number} params.firelineIntensityKwPerM - Byram fireline intensity, kW/m.
+ * @param {number} params.midflameWindKmh - wind speed, km/h. Internally
+ *   converted to mph — see module header for why ELMFire's formula requires
+ *   mph specifically.
+ * @returns {{
+ *   expectedSpotDistanceMeters: number,
+ *   version: string
+ * }}
+ */
+export function computeElmfireSpotting({ firelineIntensityKwPerM, midflameWindKmh } = {}) {
+  requireNonNegative('firelineIntensityKwPerM', firelineIntensityKwPerM);
+  requireNonNegative('midflameWindKmh', midflameWindKmh);
+
+  if (firelineIntensityKwPerM === 0 || midflameWindKmh === 0) {
+    return { expectedSpotDistanceMeters: 0, version: ELMFIRE_SPOTTING_VERSION };
+  }
+
+  const windMph = midflameWindKmh * MPH_PER_KMH;
+  const expectedSpotDistanceMeters = ELMFIRE_DOWNWIND_DISTANCE_MEAN
+    * firelineIntensityKwPerM ** ELMFIRE_FLIN_EXPONENT
+    * windMph ** ELMFIRE_WS_EXPONENT;
+
+  return { expectedSpotDistanceMeters, version: ELMFIRE_SPOTTING_VERSION };
+}
+
 // Byram (1959) flame-length coefficients, SI-native form as restated in
 // Alexander & Cruz (2012). Units: I in kW/m, L in m.
 const BYRAM_FLAME_LENGTH_COEFFICIENT = 0.0775;
@@ -128,13 +269,31 @@ const ALBINI_B = ALBINI_A - 1.4;
 // longer uses this as its default lofting height; see module header.
 export const DEFAULT_MAX_LOFT_HEIGHT_METERS = 117.0;
 
-// Explicitly UNSOURCED scaling constant: how many multiples of flame
-// length the lofting height is assumed to reach. See the "PHYSICS DEFECT
-// FOUND AND FIXED" discussion in the module header for why this exists and
-// why it must scale with flame length rather than being a fixed height.
-// This is a transparent approximation, not a value derived from Albini
-// 1979 or any other cited source.
-export const LOFT_HEIGHT_TO_FLAME_LENGTH_RATIO = 30;
+// Albini (1979) maximum firebrand lofting height coefficient, sourced from
+// the pyretechnics reimplementation's `albini_firebrand_maximum_height`
+// function (see module header): z (m) = ALBINI_LOFT_HEIGHT_COEFFICIENT *
+// firebrandDiameterMeters. Dimensionally this coefficient absorbs the
+// unit conversion and empirical plume-rise correlation from Albini's
+// submodel; pyretechnics states it as the literal constant 0.39e5.
+const ALBINI_LOFT_HEIGHT_COEFFICIENT = 0.39e5;
+
+// Default firebrand diameter (meters) = 3 mm. NOT independently sourced as
+// "the" typical firebrand size — chosen because it reproduces the 117 m
+// Albini worked-example lofting height via the sourced formula above
+// (0.39e5 * 0.003 = 117). See module header for the full caveat.
+export const DEFAULT_FIREBRAND_DIAMETER_METERS = 0.003;
+
+/**
+ * Albini (1979) maximum firebrand lofting height as a function of firebrand
+ * diameter. See module header for sourcing (pyretechnics reimplementation,
+ * not the original GTR text).
+ * @param {number} firebrandDiameterMeters
+ * @returns {number} maximum lofting height in meters
+ */
+export function albiniFirebrandMaximumHeightMeters(firebrandDiameterMeters) {
+  requireNonNegative('firebrandDiameterMeters', firebrandDiameterMeters);
+  return ALBINI_LOFT_HEIGHT_COEFFICIENT * firebrandDiameterMeters;
+}
 
 // Standard SI conversion (not fire-specific, high confidence).
 const KMH_TO_MS = 1 / 3.6;
@@ -199,9 +358,15 @@ export function albiniFlightTimeMinutes(flameLengthMeters, maxLoftHeightMeters) 
  *   effective lofting height is never below canopy top + flame length.
  * @param {number} [params.slopeFraction=0] - accepted for interface
  *   completeness; NOT currently applied (see module header).
+ * @param {number} [params.firebrandDiameterMeters] - firebrand (ember)
+ *   diameter, meters; defaults to DEFAULT_FIREBRAND_DIAMETER_METERS.
+ *   Ignored if `maxLoftHeightMeters` is supplied. See module header for
+ *   sourcing and the caveat that the default is not independently
+ *   validated as a typical firebrand size.
  * @param {number} [params.maxLoftHeightMeters] - override for the maximum
- *   firebrand lofting height; defaults to DEFAULT_MAX_LOFT_HEIGHT_METERS
- *   raised to at least canopyHeightMeters + flame length.
+ *   firebrand lofting height; if omitted, derived from
+ *   `firebrandDiameterMeters` via the sourced Albini formula, raised to at
+ *   least canopyHeightMeters + flame length.
  * @returns {{
  *   flameLengthMeters: number,
  *   maxLoftHeightMeters: number,
@@ -215,22 +380,24 @@ export function computeSpotting({
   midflameWindKmh,
   canopyHeightMeters = 0,
   slopeFraction = 0,
+  firebrandDiameterMeters = DEFAULT_FIREBRAND_DIAMETER_METERS,
   maxLoftHeightMeters = null
 } = {}) {
   requireNonNegative('firelineIntensityKwPerM', firelineIntensityKwPerM);
   requireNonNegative('midflameWindKmh', midflameWindKmh);
   requireNonNegative('canopyHeightMeters', canopyHeightMeters);
   requireFinite('slopeFraction', slopeFraction);
+  requireNonNegative('firebrandDiameterMeters', firebrandDiameterMeters);
 
   const flameLengthMeters = byramFlameLengthMeters(firelineIntensityKwPerM);
 
-  // See module header "PHYSICS DEFECT FOUND AND FIXED": the lofting height
-  // must scale with flame length (not be a near-constant default) or the
-  // flight-time formula produces spot distances that decrease with rising
-  // intensity, which is physically backwards.
+  // Lofting height is governed by firebrand (ember) size, per Albini
+  // (1979) via the pyretechnics reimplementation — see module header. It
+  // is floored at (canopy top + flame length) on ordinary geometric
+  // grounds (an ember cannot loft below the flame it rides up on).
   const loftFloorMeters = Math.max(
     canopyHeightMeters + flameLengthMeters,
-    LOFT_HEIGHT_TO_FLAME_LENGTH_RATIO * flameLengthMeters
+    albiniFirebrandMaximumHeightMeters(firebrandDiameterMeters)
   );
   const resolvedMaxLoftHeightMeters = maxLoftHeightMeters === null
     ? loftFloorMeters

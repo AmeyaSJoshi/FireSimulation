@@ -21,6 +21,7 @@ import {
   crownInitiationIntensityKwPerM
 } from './crownFire.js';
 import { windToMidflame } from './weatherInputs.js';
+import { computeElmfireSpotting } from './spotting.js';
 import {
   countSuppressionBarrierEdges,
   PROPAGATION_NEIGHBORS
@@ -29,6 +30,30 @@ import {
 const NEIGHBORS = PROPAGATION_NEIGHBORS;
 const WEATHER_INTEGRATION_STEP_MINUTES = 10;
 const WEATHER_POST_WINDOW_POLICY = 'block';
+const KMH_TO_M_PER_MIN = 1000 / 60;
+// Engineering cap on a single ember jump, not a claimed physical limit.
+// computeElmfireSpotting's own plausibility tests (spotting.test.js) bound
+// its output to "hundreds of meters to a few km" even at extreme intensity
+// and wind; this cap is a generous multiple of that documented range, kept
+// only so a pathological input cannot blow up edge count or route an ember
+// across an unreasonable fraction of the grid. It is explicitly NOT a
+// sourced maximum spot-fire distance (real extreme-fire outliers, e.g.
+// Black Saturday 2009, are documented well beyond this), and is not tuned
+// against any benchmark result.
+export const SPOTTING_MAX_DISTANCE_METERS = 5000;
+// Deterministic fractions of the expected (ELMFire mean) spot distance used
+// to seed MULTIPLE landing cells per torching edge, spanning roughly
+// 0 -> expectedSpotDistance, instead of a single cell at the mean distance.
+// Real ember showers land across a range, not at one point; a single mean
+// landing cell was measured to add false-positive detached blobs without
+// improving recall (RUN history, docs/regional-model-run/RESULTS.jsonl).
+// Fixed fractions, not a sampled/random spread, to keep the Dijkstra solve
+// deterministic. A short-hop fraction is deliberately included (see the
+// removed SPOTTING_MIN_DISTANCE_CELLS note below) -- on modest-wind fires
+// the ELMFire mean distance itself can be less than one grid cell, and
+// requiring the full mean to clear a whole cell silently disabled spotting
+// entirely in that regime.
+const SPOTTING_LANDING_FRACTIONS = Object.freeze([0.25, 0.5, 0.75, 1.0]);
 
 class MinHeap {
   #items = [];
@@ -254,7 +279,11 @@ export function createRateBasedFireSimulation({
   timestepMinutes = 1,
   burnDurationMinutes = 30,
   weatherTimeline = null,
-  maxPropagationMinutes = Infinity
+  maxPropagationMinutes = Infinity,
+  // Defaults OFF, same pattern as crown fire's data-availability gate: a
+  // regression is attributable only when the flag was deliberately flipped.
+  // See docs/spotting-implementation-plan.md.
+  enableSpotting = false
 } = {}) {
   if (!Number.isInteger(size) || size < 3) {
     throw new RangeError(`firePropagation: size must be an integer >= 3, got ${size}`);
@@ -388,6 +417,129 @@ export function createRateBasedFireSimulation({
       ? terrain.aspectNorth[current.index]
       : defaultSlopeAspectNorth;
 
+    // Spotting: deterministic long-range downwind graph edges, never random
+    // ignitions (docs/spotting-implementation-plan.md). Gated OFF by
+    // default. Cheapest-first early-outs, in order: (1) flag off -- whole
+    // block skipped; (2) canopyCrownAvailableByCell reuses the exact same
+    // per-cell gate crown fire already uses, so the overwhelming majority of
+    // cells (no measured LANDFIRE crown structure) never pay for the
+    // Rothermel call below; (3) zero wind -> zero ELMFire distance by
+    // construction, checked before that call too.
+    if (enableSpotting && canopyCrownAvailableByCell?.[current.index] === 1) {
+      const currentWeather = weatherAtTime(normalizedWeatherTimeline, current.time, initialWeather);
+      const spottingWindKmh = Number.isFinite(currentWeather.tenMeterWindKmh)
+        ? currentWeather.tenMeterWindKmh
+        : currentWeather.midflameWindKmh;
+      if (!currentWeather.weatherExpired && spottingWindKmh > 0) {
+        const currentModel = modelForIndex(current.index);
+        if (currentModel?.burnable) {
+          const currentMoisture = moistureForIndex(current.index);
+          const currentLocalCanopySheltered = canopyShelteredByCell
+            ? canopyShelteredByCell[current.index] === 1
+            : canopySheltered;
+          const currentMidflameWindKmh = windToMidflame({
+            tenMeterWindKmh: spottingWindKmh,
+            referenceHeightMeters: currentWeather.referenceHeightMeters,
+            canopySheltered: currentLocalCanopySheltered,
+            canopyHeightMeters: canopyHeightByCell?.[current.index],
+            canopyCoverFraction: canopyCoverFractionByCell?.[current.index],
+            fuelBedDepthMeters: currentModel.fuelBedDepthMeters,
+            fuelModel: currentModel
+          }).speedKmh;
+          // Head-fire intensity of the cell now actually burning -- this is
+          // the ember source, not a candidate neighbor's predicted
+          // intensity (that's what the crown-fire block below computes).
+          // No travelDirection is passed, so this resolves to the
+          // wind+slope forcing (head) direction, matching how the crown
+          // threshold check elsewhere treats "the" fireline intensity.
+          const currentSpread = calculateSurfaceSpread({
+            fuelModel: currentModel,
+            moistureFraction: currentWeather.deadMoistureFraction ?? currentMoisture.dead,
+            deadMoistureFraction: currentWeather.deadMoistureFraction ?? currentMoisture.dead,
+            liveMoistureFraction: currentWeather.liveMoistureFraction ?? currentMoisture.live,
+            deadMoistureByClass: currentWeather.deadMoistureByClass ?? deadMoistureByClass,
+            liveMoistureByClass: currentWeather.liveMoistureByClass ?? liveMoistureByClass,
+            fuelLoadScale: fuelLoadScaleByCell?.[current.index] ?? 1,
+            midflameWindKmh: currentMidflameWindKmh,
+            windDirectionRadians: currentWeather.windDirectionRadians,
+            slopeRadians: currentSlope,
+            slopeAspectEast: currentAspectEast,
+            slopeAspectNorth: currentAspectNorth
+          });
+          // Torching threshold reuses the sourced Van Wagner initiation
+          // intensity crown fire already uses -- "torching trees are the
+          // dominant ember source" (spotting.js module header) -- rather
+          // than inventing a separate spotting-specific intensity cutoff.
+          // >= 0, not just Number.isFinite: canopy arrays are pre-filled with
+          // a -1 no-data sentinel (main.js/fireFieldInputs.js), and -1 IS
+          // finite, so a bare isFinite check would treat "no measured crown
+          // structure" as a valid (negative) canopy base height.
+          const currentCanopyBaseHeight = canopyBaseHeightByCell?.[current.index];
+          const torchingThresholdKwPerM = Number.isFinite(currentCanopyBaseHeight)
+            && currentCanopyBaseHeight >= 0
+            ? crownInitiationIntensityKwPerM({
+              canopyBaseHeightMeters: currentCanopyBaseHeight,
+              foliarMoistureFraction: canopyFoliarMoistureFraction
+            })
+            : Infinity;
+          if (currentSpread.firelineIntensityKwPerM > torchingThresholdKwPerM) {
+            const { expectedSpotDistanceMeters } = computeElmfireSpotting({
+              firelineIntensityKwPerM: currentSpread.firelineIntensityKwPerM,
+              midflameWindKmh: spottingWindKmh
+            });
+            const meanSpotDistanceMeters = Math.min(expectedSpotDistanceMeters, SPOTTING_MAX_DISTANCE_METERS);
+            if (meanSpotDistanceMeters > 0) {
+              const windEast = Math.cos(currentWeather.windDirectionRadians);
+              const windNorth = Math.sin(currentWeather.windDirectionRadians);
+              // Seed several deterministic landing cells spanning roughly
+              // 0 -> expectedSpotDistance instead of only the mean -- see
+              // SPOTTING_LANDING_FRACTIONS above. Each fraction is an
+              // independent candidate edge; distinct fractions can round to
+              // the same grid cell at short range, which is harmless (the
+              // arrival-time relaxation below is idempotent).
+              for (let fractionIndex = 0; fractionIndex < SPOTTING_LANDING_FRACTIONS.length;
+                fractionIndex += 1) {
+                const spotDistanceMeters = meanSpotDistanceMeters
+                  * SPOTTING_LANDING_FRACTIONS[fractionIndex];
+                const landingCol = col + Math.round(spotDistanceMeters * windEast / cellSizeMeters);
+                const landingRow = row - Math.round(spotDistanceMeters * windNorth / cellSizeMeters);
+                if (landingCol < 0 || landingCol >= size || landingRow < 0 || landingRow >= size) continue;
+                const landingIndex = landingRow * size + landingCol;
+                if (landingIndex === current.index) continue;
+                const landingModel = modelForIndex(landingIndex);
+                const landingMoisture = moistureForIndex(landingIndex);
+                const landingDeadMoisture = currentWeather.deadMoistureFraction ?? landingMoisture.dead;
+                // Landing cell must be burnable and below its fuel's
+                // moisture of extinction -- the existing Rothermel fields,
+                // no invented ignition-probability constant.
+                if (!landingModel?.burnable
+                  || !Number.isFinite(landingModel.moistureOfExtinctionFraction)
+                  || landingDeadMoisture >= landingModel.moistureOfExtinctionFraction) {
+                  continue;
+                }
+                // Ember flight time as simple wind-speed kinematics
+                // (distance / transport wind speed) -- the same
+                // constant-wind simplification spotting.js's Albini path
+                // documents for descent drift, applied here in reverse to
+                // turn the ELMFire distance into a travel-time edge cost.
+                // spotDistanceMeters can be 0 at the shortest fraction when
+                // the mean distance itself is tiny; flightTimeMinutes is
+                // then 0, which is a same-timestep ignition, not a divide
+                // issue (spottingWindKmh > 0 is already guaranteed above).
+                const flightTimeMinutes = spotDistanceMeters / (spottingWindKmh * KMH_TO_M_PER_MIN);
+                const candidateTime = current.time + flightTimeMinutes;
+                if (candidateTime <= maxPropagationMinutes
+                  && candidateTime < arrivalTimes[landingIndex]) {
+                  arrivalTimes[landingIndex] = candidateTime;
+                  heap.push({ time: candidateTime, index: landingIndex });
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
     for (let directionIndex = 0; directionIndex < NEIGHBORS.length; directionIndex += 1) {
       if (waterBarrierEdges?.[current.index * NEIGHBORS.length + directionIndex] === 1) continue;
       const suppressionTime = suppressionBarrierTimes?.[
@@ -469,10 +621,14 @@ export function createRateBasedFireSimulation({
           backingRateMPerMin: spread.backingRateMPerMin,
           angleRadians
         });
+        // Same -1 no-data sentinel concern as above: require >= 0 / > 0, not
+        // just finiteness, before trusting these as measured canopy values.
         if (!canopyCrownAvailableByCell?.[nextIndex]
           || !Number.isFinite(weather.tenMeterWindKmh)
           || !Number.isFinite(canopyBaseHeightByCell?.[nextIndex])
-          || !Number.isFinite(canopyBulkDensityByCell?.[nextIndex])) {
+          || canopyBaseHeightByCell[nextIndex] < 0
+          || !Number.isFinite(canopyBulkDensityByCell?.[nextIndex])
+          || canopyBulkDensityByCell[nextIndex] <= 0) {
           return surfaceDirectionalRate;
         }
 

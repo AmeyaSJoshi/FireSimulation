@@ -187,7 +187,11 @@ export function runConusHackathonBenchmarks({
   liveMoistureFraction = 0.5,
   midflameWindKmh = 0,
   fuelLoadScale = 1,
-  splits = ['calibration', 'holdout']
+  splits = ['calibration', 'holdout'],
+  // Defaults OFF -- see enableSpotting in firePropagation.js. Threaded
+  // through here only so the RUN-021 spotting measurement can flip it on
+  // for a benchmark comparison; every other caller is unaffected.
+  enableSpotting = false
 } = {}) {
   if (!Number.isInteger(size) || size < 3) {
     throw new RangeError('hackathonBenchmarkRunner: size must be an integer >= 3');
@@ -264,6 +268,7 @@ export function runConusHackathonBenchmarks({
       timestepMinutes: 1,
       burnDurationMinutes: 30,
       maxPropagationMinutes: Infinity,
+      enableSpotting,
       ...(realFuel
         ? {
           fuelModelCodes: realFuel.fuelModelCodes,
