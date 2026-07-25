@@ -101,7 +101,7 @@ test('carries explicit forest fuel alternatives for the uncertainty ensemble', (
     crosswalk: crosswalkLandCoverToFuel
   });
 
-  assert.deepEqual(result.fuelModelAlternativesByCell[0], ['TL1', 'TL3', 'TU2']);
+  assert.deepEqual(result.fuelModelAlternativesByCell[0], ['TU2', 'TU1', 'TU3', 'TL3', 'TL1']);
   assert.equal(result.summary.fuelModelAlternativeCellCount, 4);
 });
 
@@ -291,7 +291,7 @@ test('does not reuse one fractional-cover decision for every cell of a WorldCove
     crosswalk: crosswalkLandCoverToFuel
   });
 
-  assert.deepEqual(result.fuelModelCodes, ['TL1', 'GR2', 'TL1', 'GR2']);
+  assert.deepEqual(result.fuelModelCodes, ['TU2', 'GR2', 'TU2', 'GR2']);
   assert.ok(Math.abs(result.fuelLoadScaleByCell[0] - 0.9) < 1e-6);
   assert.ok(Math.abs(result.fuelLoadScaleByCell[1] - 0.9) < 1e-6);
 });

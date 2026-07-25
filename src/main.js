@@ -2265,7 +2265,23 @@ fireWorker.onmessage = ({ data }) => {
   const metrics = data.metrics ?? {};
   const direction = formatCompassDirection(metrics.dominantSpreadDirectionDeg ?? 0);
   const params = getSimulationParams();
-  simulationReadout.textContent = `${data.stepCount.toString().padStart(3, '0')} ticks · ${formatModelTime(metrics.elapsedMinutes ?? 0)} · ${Math.round(metrics.burnedAreaKm2 ?? 0).toLocaleString()} km² burned`;
+  // A run that burns nothing is usually a correct physical result, not a
+  // failure: the ignition cell may be non-burnable (bare rock, water, no-data),
+  // or the fuel's spread rate at the current wind/slope may be too low to cross
+  // even one cell in the model window. Both used to surface as a bare "0 km²",
+  // which reads as a broken app. Say which it is.
+  const burned = metrics.burnedAreaKm2 ?? 0;
+  let zeroReason = '';
+  if (burned <= 0 && data.stepCount > 0) {
+    const code = lastFuelDecision?.fuelCode ?? 'unknown';
+    if (lastFuelDecision && lastFuelDecision.burnable === false) {
+      zeroReason = ` · no spread — ignition cell is non-burnable (${code})`;
+    } else {
+      const cellM = Math.round(FIRE_CELL_SIZE_KM * 1000);
+      zeroReason = ` · no spread — ${code} below cell-crossing rate at ${params.windSpeed ?? 0} km/h (needs to cross ${cellM} m; try more wind or slope)`;
+    }
+  }
+  simulationReadout.textContent = `${data.stepCount.toString().padStart(3, '0')} ticks · ${formatModelTime(metrics.elapsedMinutes ?? 0)} · ${Math.round(burned).toLocaleString()} km² burned${zeroReason}`;
   modelTimeValue.textContent = formatModelTime(metrics.elapsedMinutes ?? 0);
   burnedAreaValue.textContent = `${Math.round(metrics.burnedAreaKm2 ?? 0).toLocaleString()} km²`;
   footprintValue.textContent = `${Math.round(metrics.footprintAreaKm2 ?? 0).toLocaleString()} km²`;

@@ -35,17 +35,31 @@ const CROSSWALK = new Map([
     rationale: 'WorldCover no-data → non-burnable barrier; the model must not invent fuel where the source has no class.'
   }],
   [10, {
-    fuelCode: 'TL1',
-    fuelModelAlternatives: ['TL1', 'TL3', 'TU2'],
+    // Was TL1 (bare compact litter). Changed to TU2 -- already listed below as
+    // a contemplated alternative, so this is a documented option, not a new
+    // invention. Evidence: RUN-018 fetched real LANDFIRE FBFM40 for the six
+    // benchmark landscapes and found TU5/SH7 where this crosswalk had assumed
+    // TL1 everywhere; TL1 tops out near 145 kW/m and structurally locked out
+    // crown fire. TL1 also cannot carry fire at all at this app's scale --
+    // measured 2 m of spread in 48 min at calm, 42 m at 20 km/h, against a
+    // 500 m cell -- because TL1 models a bare forest floor with no understory,
+    // whereas tree cover that actually carries fire has a shrub/grass
+    // understory. TU2 (moderate load, humid-climate timber-shrub) is the
+    // conservative member of that family: still near-inert at dead calm
+    // (16 m/48 min, correct -- closed-canopy forest does not run without wind)
+    // but crosses a cell at ~20 km/h. TU5 was NOT chosen: it is the very-high-load
+    // dry-climate model, unjustifiable as a global default for WorldCover class 10,
+    // which spans rainforest and boreal as well as dry western US timber.
+    fuelCode: 'TU2',
+    fuelModelAlternatives: ['TU2', 'TU1', 'TU3', 'TL3', 'TL1'],
     fuelLoadScale: 1,
     confidence: 'medium',
-    // Compact litter under closed canopy can hold ignition through a brief
+    // Litter/understory under closed canopy can hold ignition through a brief
     // humidity/rain excursion without a full duff/heavy-fuel bed (that
     // stronger case is the separate, FCCS-evidenced globalFuelbedPersistenceMinutes
-    // bridge). 6 hours is a conservative fraction of that bridge's 48-hour
-    // ceiling, chosen because TL1 is explicitly the *low*-load litter class.
+    // bridge). 6 hours is a conservative fraction of that bridge's 48-hour ceiling.
     fuelPersistenceMinutes: 360,
-    rationale: 'Tree cover → conifer/broadleaf litter approximated as Scott & Burgan TL1 (low load compact litter). Local species mix not considered.'
+    rationale: 'Tree cover → timber with shrub/grass understory, approximated as Scott & Burgan TU2 (moderate load, humid climate timber-shrub). Chosen over TL1 because TL1 models a bare forest floor and cannot carry fire; see RUN-018 LANDFIRE evidence. Local species mix not considered; unvalidated outside CONUS, where no perimeter benchmark exists.'
   }],
   [20, {
     fuelCode: 'SH2',
@@ -269,7 +283,7 @@ function fractionalVegetationDecision(landCover) {
 
   const fractions = landCover.coverFractions;
   const components = [
-    { key: 'treeCoverFraction', label: 'tree', fuelCode: 'TL1' },
+    { key: 'treeCoverFraction', label: 'tree', fuelCode: 'TU2' },
     { key: 'shrubCoverFraction', label: 'shrub', fuelCode: 'SH2' },
     { key: 'grassCoverFraction', label: 'grass', fuelCode: landCover.classCode === 90 ? 'GS1' : 'GR2' },
     { key: 'cropsCoverFraction', label: 'crop', fuelCode: 'AG1' }

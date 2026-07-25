@@ -17,11 +17,15 @@ test('grassland (WorldCover code 30) maps to a grass fuel model', () => {
   assert.equal(decision.fuelLoadScale, 1);
 });
 
-test('tree cover (10) maps to a timber-litter fuel model', () => {
+test('tree cover (10) maps to a timber fuel model with understory', () => {
   const decision = crosswalkLandCoverToFuel({ classCode: 10, className: 'Tree cover' });
-  assert.match(decision.fuelCode, /^TL/, `expected TL* fuel, got ${decision.fuelCode}`);
+  // Was /^TL/ (timber litter). Tree cover now maps to TU* (timber-understory):
+  // TL models a bare forest floor and cannot carry fire at this app's scale,
+  // while real tree cover that burns has a shrub/grass understory. See the
+  // RUN-018 LANDFIRE evidence cited in landCoverToFuel.js.
+  assert.match(decision.fuelCode, /^TU/, `expected TU* fuel, got ${decision.fuelCode}`);
   assert.equal(decision.burnable, true);
-  assert.deepEqual(decision.fuelModelAlternatives, ['TL1', 'TL3', 'TU2']);
+  assert.deepEqual(decision.fuelModelAlternatives, ['TU2', 'TU1', 'TU3', 'TL3', 'TL1']);
 });
 
 test('published global fuelbeds override coarse class guesses when available', () => {
@@ -178,7 +182,7 @@ test('Copernicus vegetation fractions select the dominant fuel and scale availab
     fractionalCoverConfidence: 'high'
   });
 
-  assert.equal(decision.fuelCode, 'TL1');
+  assert.equal(decision.fuelCode, 'TU2');
   assert.equal(decision.fuelLoadScale, 0.9);
   assert.equal(decision.confidence, 'low');
   assert.equal(decision.fractionalCoverUsed, true);

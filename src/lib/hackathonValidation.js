@@ -30,6 +30,43 @@ function median(values) {
     : sorted[middle];
 }
 
+// Observed-area ceiling below which a wildfire's final size is dominated by
+// successful initial attack rather than by fuel, weather, or terrain. Fires
+// this small stayed small BECAUSE they were fought and contained, usually
+// within days -- their perimeter records the suppression effort, not the
+// landscape's capacity to burn. This model implements no suppression
+// mechanism (see RUN-019/019b: no dated perimeter-progression data source is
+// reachable for these cases), so scoring such fires as though they burned
+// freely for their full alarm-to-containment window compares the model
+// against a quantity it does not attempt to predict.
+//
+// The threshold is defined ONLY from observed ground truth (final area). It
+// deliberately does not consider model output, so it cannot be tuned to
+// flatter a result. Nothing is excluded from the headline metrics below --
+// the tiers are reported alongside them so the confound is visible, not
+// hidden.
+export const INITIAL_ATTACK_AREA_CEILING_KM2 = 2;
+
+function tierFor(entry) {
+  const observed = entry.report.observedAreaKm2;
+  if (!Number.isFinite(observed)) return 'unclassified';
+  return observed < INITIAL_ATTACK_AREA_CEILING_KM2
+    ? 'suppressionConfounded'
+    : 'freeBurningComparable';
+}
+
+function summarizeTier(cases) {
+  const iou = finiteValues(cases, (entry) => entry.report.iou);
+  return {
+    caseCount: cases.length,
+    caseIds: cases.map((entry) => entry.id),
+    meanIoU: mean(iou),
+    medianIoU: median(iou),
+    meanPrecision: mean(finiteValues(cases, (entry) => entry.report.precision)),
+    meanRecall: mean(finiteValues(cases, (entry) => entry.report.recall))
+  };
+}
+
 function requireCases(cases) {
   if (!Array.isArray(cases) || cases.length === 0) {
     throw new RangeError('hackathonValidation: at least one benchmark case is required');
@@ -74,6 +111,17 @@ export function summarizeHackathonBenchmarks(cases) {
     bestCaseIoU: best.report.iou,
     worstCaseId: worst.id,
     worstCaseIoU: worst.report.iou,
+    tiers: {
+      // Reported alongside -- never instead of -- the aggregate metrics above.
+      suppressionConfounded: summarizeTier(
+        cases.filter((entry) => tierFor(entry) === 'suppressionConfounded')
+      ),
+      freeBurningComparable: summarizeTier(
+        cases.filter((entry) => tierFor(entry) === 'freeBurningComparable')
+      ),
+      basis: `observed area vs ${INITIAL_ATTACK_AREA_CEILING_KM2} km2 ceiling; ground truth only, independent of model output`,
+      caveat: 'suppressionConfounded cases were contained by firefighters; this model has no suppression mechanism, so its overprediction on them is expected and is not evidence about spread physics. Headline meanIoU/medianIoU still include them.'
+    },
     interpretation: 'U.S. diagnostic benchmark only; these metrics are evidence for calibration, not operational accuracy.'
   };
 }
