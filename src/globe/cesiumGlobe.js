@@ -55,11 +55,16 @@ export function initCesiumGlobe() {
 
   let clickCallback = null;
   viewer.screenSpaceEventHandler.setInputAction((movement) => {
-    // globe.pick only hits *loaded* terrain geometry, so it returns undefined
-    // while tiles are still streaming and the click silently does nothing.
-    // Fall back to the smooth ellipsoid, which is always pickable.
+    // Three pick strategies, most specific first:
+    //  1. scene.pickPosition reads the depth buffer, so it is the only one
+    //     that hits Google 3D Tiles geometry. With photoreal tiles on, the
+    //     globe is hidden and the other two would miss entirely.
+    //  2. globe.pick for the plain terrain globe — but it only hits *loaded*
+    //     terrain, so it misses while tiles are still streaming.
+    //  3. the smooth ellipsoid, which is always pickable.
     const ray = viewer.camera.getPickRay(movement.position);
-    const cartesian = (ray && viewer.scene.globe.pick(ray, viewer.scene))
+    const cartesian = viewer.scene.pickPosition(movement.position)
+      ?? (ray && viewer.scene.globe.pick(ray, viewer.scene))
       ?? viewer.camera.pickEllipsoid(movement.position, viewer.scene.globe.ellipsoid);
     if (!cartesian) return;
     const carto = Cesium.Cartographic.fromCartesian(cartesian);

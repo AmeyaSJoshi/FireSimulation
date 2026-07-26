@@ -49,7 +49,11 @@ export function createFireOverlay(viewer) {
     timeMinutes = 0;
   }
 
-  // Precompute a world position per cell once, on the terrain/tileset surface.
+  // Precompute a world position per cell once. These start on the ellipsoid
+  // and are then clamped onto whatever surface is actually rendered — with
+  // Google 3D Tiles the ground can be hundreds of metres above the ellipsoid,
+  // and unclamped flames draw from under the hillside, visibly detached from
+  // their own burn scar.
   function buildCellPositions() {
     const { gridSize, bbox } = result;
     const [west, south, east, north] = bbox;
@@ -62,6 +66,38 @@ export function createFireOverlay(viewer) {
         cellPositions[row * gridSize + col] = Cesium.Cartesian3.fromDegrees(lon, lat, 0);
       }
     }
+    clampCellPositionsToSurface();
+  }
+
+  // Flames sit FLAME_LIFT_METERS above the surface so they read as standing on
+  // the ground rather than z-fighting it.
+  const FLAME_LIFT_METERS = 3;
+
+  // clampToHeightMostDetailed proved unreliable here (it resolved without ever
+  // moving the positions), so sample the surface height directly at the field
+  // centre and lift every cell by it. The field is 640 m across, so one sample
+  // is a good approximation; per-cell sampling would cost 4096 picks.
+  function clampCellPositionsToSurface() {
+    const scene = viewer.scene;
+    if (typeof scene.sampleHeight !== 'function') return;
+    const { bbox } = result;
+    const centre = Cesium.Cartographic.fromDegrees(
+      (bbox[0] + bbox[2]) / 2,
+      (bbox[1] + bbox[3]) / 2
+    );
+    let surfaceHeight;
+    try {
+      surfaceHeight = scene.sampleHeight(centre);
+    } catch {
+      return; // no pickable surface (e.g. plain ellipsoid globe)
+    }
+    if (!Number.isFinite(surfaceHeight)) return;
+    const lift = surfaceHeight + FLAME_LIFT_METERS;
+    for (let i = 0; i < cellPositions.length; i += 1) {
+      const carto = Cesium.Cartographic.fromCartesian(cellPositions[i]);
+      cellPositions[i] = Cesium.Cartesian3.fromRadians(carto.longitude, carto.latitude, lift);
+    }
+    refreshLiveCells();
   }
 
   // Charcoal scar: cheap static draped canvas, only rebuilt when it grows.
@@ -151,7 +187,6 @@ export function createFireOverlay(viewer) {
         // Flame reads as a column: keep it visible over the tiles at range.
         scaleByDistance: new Cesium.NearFarScalar(200, 1.6, 6000, 0.35),
         translucencyByDistance: new Cesium.NearFarScalar(200, 1.0, 12000, 0.25),
-        disableDepthTestDistance: Number.POSITIVE_INFINITY
       });
       used += 1;
     }
