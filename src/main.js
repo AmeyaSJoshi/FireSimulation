@@ -1973,7 +1973,11 @@ fireWorker.onmessage = ({ data }) => {
   liveModelMinutes = metrics.elapsedMinutes ?? 0;
   if (blockSceneInstance && Number(timelineScrub.dataset.scrubbing) !== 1) {
     blockSceneInstance.setTime(liveModelMinutes);
-    fireDrape?.setTime(liveModelMinutes);
+    // The drape owns its own clock (see startDrapePlayback) and plays on a
+    // completely different timescale than this legacy worker. Pinning it to
+    // the worker's elapsedMinutes here silently stopped drape playback dead
+    // at ~0 the instant the first worker tick arrived.
+    if (!DRAPE_ON_GLOBE) fireDrape?.setTime(liveModelMinutes);
     timelineScrub.value = String(Math.min(Number(timelineScrub.max), liveModelMinutes));
     timelineScrubValue.textContent = formatModelTime(liveModelMinutes);
   }
