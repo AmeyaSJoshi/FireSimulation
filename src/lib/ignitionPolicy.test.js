@@ -2,11 +2,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { canIgniteFuelDecision, canIgniteSurface, surfaceIgnitionMessage } from './ignitionPolicy.js';
 
-test('only a confirmed land surface can ignite', () => {
+test('ignition is blocked only by confirmed water, not by an unresolved classification', () => {
   assert.equal(canIgniteSurface(false), true);
   assert.equal(canIgniteSurface(true), false);
-  assert.equal(canIgniteSurface(null), false);
-  assert.equal(canIgniteSurface(undefined), false);
+  // null/undefined = the terrain sampler hasn't resolved yet, not a known
+  // ocean click. Blocking on this used to make every pre-load click read as
+  // permanently "unavailable," since retrying just re-read the same
+  // not-yet-loaded state. Unknown now proceeds; runFromClick's real
+  // WorldCover classification (classCode 80) still catches actual water.
+  assert.equal(canIgniteSurface(null), true);
+  assert.equal(canIgniteSurface(undefined), true);
 });
 
 test('surface messages explain the ignition boundary', () => {
