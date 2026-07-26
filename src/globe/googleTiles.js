@@ -1,12 +1,35 @@
 import * as Cesium from 'cesium';
 
-// Google Photorealistic 3D Tiles. Requires a Cesium ion token — the tileset is
-// served through ion, so with VITE_CESIUM_ION_TOKEN unset this throws and the
-// caller keeps P1's imagery/terrain globe instead (short-circuited, not deleted).
+// Google Photorealistic 3D Tiles.
+//
+// Two ways in, and the app supports both because they need different keys:
+//   1. VITE_GOOGLE_MAPS_API_KEY — talks to Google's tile service directly, no
+//      Cesium ion account needed. Preferred.
+//   2. VITE_CESIUM_ION_TOKEN — the same tileset proxied through ion.
+// With neither set this throws and the caller keeps the plain imagery globe.
+const GOOGLE_MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
+const GOOGLE_3D_TILES_URL = 'https://tile.googleapis.com/v1/3dtiles/root.json';
+
+export function hasPhotorealisticTilesKey() {
+  const google = typeof GOOGLE_MAPS_API_KEY === 'string' && GOOGLE_MAPS_API_KEY.trim().length > 0;
+  const ion = typeof import.meta.env.VITE_CESIUM_ION_TOKEN === 'string'
+    && import.meta.env.VITE_CESIUM_ION_TOKEN.trim().length > 0;
+  return google || ion;
+}
+
 export async function addGooglePhotorealisticTiles(viewer) {
-  const tileset = await Cesium.createGooglePhotorealistic3DTileset();
+  let tileset;
+  if (typeof GOOGLE_MAPS_API_KEY === 'string' && GOOGLE_MAPS_API_KEY.trim().length > 0) {
+    tileset = await Cesium.Cesium3DTileset.fromUrl(
+      `${GOOGLE_3D_TILES_URL}?key=${GOOGLE_MAPS_API_KEY.trim()}`,
+      { showCreditsOnScreen: true }
+    );
+  } else {
+    tileset = await Cesium.createGooglePhotorealistic3DTileset({ onlyUsingWithGoogleGeocoder: false });
+  }
   viewer.scene.primitives.add(tileset);
-  // The photoreal mesh *is* the surface; the underlying globe would z-fight it.
+  // The photoreal mesh *is* the surface; the underlying globe would z-fight it
+  // and poke through the buildings.
   viewer.scene.globe.show = false;
   return tileset;
 }
@@ -15,20 +38,37 @@ export async function addGooglePhotorealisticTiles(viewer) {
 export const AERIAL_PITCH_RADIANS = Cesium.Math.toRadians(-55);
 
 export function flyToAerial(viewer, { latitude, longitude, rangeMeters = 900, duration = 1.5 }) {
-  viewer.camera.flyToBoundingSphere(
-    new Cesium.BoundingSphere(
-      Cesium.Cartesian3.fromDegrees(longitude, latitude, 0),
-      rangeMeters * 0.5
-    ),
-    {
-      duration,
-      offset: new Cesium.HeadingPitchRange(
-        Cesium.Math.toRadians(30),
-        AERIAL_PITCH_RADIANS,
-        rangeMeters
-      )
-    }
+  // Cesium cancels an in-progress camera flight when it sees user input, and
+  // callers start this from inside the click handler — the trailing mouse-up
+  // of that same click killed the flight and left the camera top-down. Defer
+  // past the input sequence so the flight survives.
+  //
+  // setTimeout, not requestAnimationFrame: rAF is throttled to zero in
+  // background/headless contexts, which silently dropped the flight entirely.
+  setTimeout(() => flyNow(viewer, { latitude, longitude, rangeMeters, duration }), 0);
+}
+
+// flyToBoundingSphere never tweened here (it silently no-ops unless duration
+// is 0), so the destination is computed explicitly and handed to camera.flyTo.
+function flyNow(viewer, { latitude, longitude, rangeMeters, duration }) {
+  const pitch = AERIAL_PITCH_RADIANS;
+  const heading = Cesium.Math.toRadians(30);
+  // Pull the camera back along the view ray so the target sits centre-frame
+  // at the requested tilt.
+  const height = Math.max(120, rangeMeters * Math.sin(-pitch));
+  const ground = rangeMeters * Math.cos(-pitch);
+  const metresPerDegreeLat = 111320;
+  const metresPerDegreeLon = metresPerDegreeLat * Math.max(Math.cos(Cesium.Math.toRadians(latitude)), 1e-6);
+  const destination = Cesium.Cartesian3.fromDegrees(
+    longitude - (ground * Math.sin(heading)) / metresPerDegreeLon,
+    latitude - (ground * Math.cos(heading)) / metresPerDegreeLat,
+    height
   );
+  viewer.camera.flyTo({
+    destination,
+    orientation: { heading, pitch, roll: 0 },
+    duration
+  });
 }
 
 // Minimal chrome. The ion/Google data attribution is deliberately NOT hidden —

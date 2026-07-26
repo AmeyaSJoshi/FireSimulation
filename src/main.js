@@ -870,7 +870,7 @@ try {
   cesiumGlobe = initCesiumGlobe();
   fireDrape = createFireOverlay(cesiumGlobe.viewer);
   globeReady = true;
-  if (import.meta.env.DEV) window.__ignis = { viewer: cesiumGlobe.viewer, fireDrape };
+  if (import.meta.env.DEV) window.__ignis = { viewer: cesiumGlobe.viewer, fireDrape, globe: cesiumGlobe };
   cesiumGlobe.onGlobeClick(({ lat, lon }) => handleGlobeClick(lat, lon));
 } catch (error) {
   console.error('[main] Cesium globe failed to initialize — clicks will not work:', error);
@@ -938,6 +938,10 @@ function handleGlobeClick(lat, lon) {
   }
 
   pickedCoordinates = coordinates;
+  // Tilted aerial framing, fired immediately on click. This must NOT wait on
+  // runFromClick — that blocks on an Overpass round trip, so the camera would
+  // sit top-down for seconds and never move at all if the fetch rejects.
+  if (DRAPE_ON_GLOBE) cesiumGlobe?.flyToAerial({ latitude: lat, longitude: lon });
   startFireSimulation(coordinates);
 
   // P3: real WorldCover + OSM ignition, draped onto the globe in place. The
@@ -947,11 +951,6 @@ function handleGlobeClick(lat, lon) {
     console.info('[runFromClick]', `${burned}/${result.fuelCodes.length} cells burned`,
       `· ${result.buildings.length} buildings · ${result.roads.length} road segments`, result.provenance);
     if (DRAPE_ON_GLOBE) {
-      // Tilted aerial framing over the bbox centre — never top-down.
-      cesiumGlobe?.flyToAerial({
-        latitude: (result.bbox[1] + result.bbox[3]) / 2,
-        longitude: (result.bbox[0] + result.bbox[2]) / 2
-      });
       fireDrape?.show(result);
       fireDrape?.setTime(liveModelMinutes);
     }
