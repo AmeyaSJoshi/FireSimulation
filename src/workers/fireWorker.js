@@ -12,6 +12,7 @@ let config = null;
 let ensembleReport = null;
 let ensembleSent = false;
 let lastRenderedModelTime = null;
+let arrivalFieldSent = false;
 
 function emitFrame() {
   if (!simulation) return;
@@ -44,6 +45,18 @@ function emitFrame() {
       ensemble.arrivalTimeQuantiles.high.buffer
     );
   }
+  // The Dijkstra solve computes every cell's arrival time up front; step()
+  // only advances modelTime and reclassifies against that already-solved
+  // array (see firePropagation.js refreshState). Send it once, as a plain
+  // clone — NOT a transferable — because the worker keeps reading
+  // simulation.arrivalTimes on every subsequent step/getFrame call.
+  const arrivalField = !arrivalFieldSent
+    ? {
+      size: snapshot.size,
+      cellSizeMeters: config?.cellSizeKm != null ? config.cellSizeKm * 1000 : null,
+      values: Float32Array.from(snapshot.arrivalTimes)
+    }
+    : null;
   self.postMessage({
     type: 'frame',
     runId: config?.runId,
@@ -56,9 +69,11 @@ function emitFrame() {
     terrainAvailable: snapshot.terrainAvailable,
     metrics,
     ensemble,
+    arrivalField,
     paused
   }, transferables);
   if (ensemble) ensembleSent = true;
+  if (arrivalField) arrivalFieldSent = true;
   lastRenderedModelTime = metrics.elapsedMinutes;
   const hasNoFutureArrivals = snapshot.pendingCount === undefined || snapshot.pendingCount === 0;
   if (!paused && snapshot.activeCount === 0 && hasNoFutureArrivals && snapshot.stepCount > 10 && timer) {
@@ -69,7 +84,15 @@ function emitFrame() {
 
 function createPhase1Simulation(nextConfig) {
   const runtime = resolvePhase1RuntimeInputs(nextConfig);
+  // Block scale (640 m field) is 8x narrower than SPOTTING_MAX_DISTANCE_METERS
+  // (5000 m, firePropagation.js) — a single ember flight could land off the
+  // field entirely. Spotting stays off; state it explicitly rather than
+  // relying on the function default, and assert it so a future change to
+  // the config object can't silently flip it back on.
+  const enableSpotting = nextConfig.enableSpotting === true;
+  console.assert(enableSpotting === false, 'fireWorker: spotting must stay off at block scale');
   return createRateBasedFireSimulation({
+    enableSpotting,
     size: nextConfig.size,
     cellSizeMeters: (nextConfig.cellSizeKm ?? 1) * 1000,
     ignition: nextConfig.ignition,
@@ -118,6 +141,7 @@ function startSimulation(nextConfig) {
   config = nextConfig;
   ensembleReport = null;
   ensembleSent = false;
+  arrivalFieldSent = false;
   lastRenderedModelTime = null;
   simulation = config.engine === 'phase1'
     ? createPhase1Simulation(config)

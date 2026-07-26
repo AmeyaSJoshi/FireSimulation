@@ -1,11 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
-import { cartesianToLatitudeLongitude, latitudeLongitudeToCartesian } from './lib/coordinateMath.js';
 import {
   DEFAULT_ELEVATION_FIELD_SAMPLE_SIZE,
   fetchElevationField,
@@ -14,7 +12,6 @@ import {
 import { createSpatialGrid } from './lib/spatialGrid.js';
 import { canIgniteFuelDecision, canIgniteSurface, surfaceIgnitionMessage } from './lib/ignitionPolicy.js';
 import { formatLocationLabel } from './lib/locationLabel.js';
-import { isLikelyWaterRgb, latitudeLongitudeToEarthUv, WATER_BLUE_MARGIN, WATER_BLUE_MIN } from './lib/fireOverlayMapping.js';
 import { buildSpreadExplanation, formatCompassDirection, formatElevationRange, formatModelTime } from './lib/scenarioInterpretation.js';
 import { clearScenarioRecords, compareScenarioMetrics, loadScenarioRecords, saveScenarioRecord } from './lib/scenarioRecords.js';
 import { createTerrainSampler } from './lib/terrainSampler.js';
@@ -29,7 +26,7 @@ import {
   FRACTIONAL_WATER_BARRIER_THRESHOLD_PERCENT
 } from './lib/landCoverToFuel.js';
 import { buildFuelModelCodeField } from './lib/fireFieldInputs.js';
-import { isSimulationSettled, shouldAutoRotate } from './lib/simulationLifecycle.js';
+import { isSimulationSettled } from './lib/simulationLifecycle.js';
 import { compassToMathRadians, fetchWeatherInputs, windToMidflame } from './lib/weatherInputs.js';
 import {
   aggregateWorldCoverFineSamples,
@@ -38,9 +35,7 @@ import {
   normalizeWorldCoverFineSamples,
   summarizeWorldCoverFineCoverage,
   WORLD_COVER_FINE_BATCH_RETRIES,
-  WORLD_COVER_FINE_REQUEST_CONCURRENCY,
-  WORLD_COVER_FINE_SAMPLE_OFFSETS,
-  WORLD_COVER_FINE_SAMPLES_PER_CELL
+  WORLD_COVER_FINE_REQUEST_CONCURRENCY
 } from './lib/worldCoverFine.js';
 import {
   aggregateCanopyHeightSamples,
@@ -50,6 +45,11 @@ import {
 } from './lib/canopyHeight.js';
 import { resolveWaterEvidence, WATER_AUTHORITY_VERSION } from './lib/waterAuthority.js';
 import { classifyScenarioEvidence, formatScenarioEvidence } from './lib/scenarioEvidence.js';
+import { BUILT_UP_CLASS_CODE, fetchUrbanFootprintsForBbox } from './lib/urbanFootprints.js';
+import { buildFuelColorField, createBlockScene } from './renderers/blockScene.js';
+import { initCesiumGlobe } from './globe/cesiumGlobe.js';
+import { runFromClick } from './sim/runFromClick.js';
+import { createFireOverlay } from './globe/fireOverlay.js';
 import './styles.css';
 
 // ─────────────────────────────────────────────────────────────
@@ -78,11 +78,15 @@ const slopeValue = document.querySelector('#slope-value');
 const uncertaintyToggle = document.querySelector('#uncertainty-toggle');
 const pauseButton = document.querySelector('#pause-button');
 const resetButton = document.querySelector('#reset-button');
+const timelineScrub = document.querySelector('#timeline-scrub');
+const timelineScrubValue = document.querySelector('#timeline-scrub-value');
 const simulationReadout = document.querySelector('#simulation-readout');
 const simulationNote = document.querySelector('.simulation-note');
 const footprintValue = document.querySelector('#footprint-value');
 const perimeterValue = document.querySelector('#perimeter-value');
 const scaleValue = document.querySelector('#scale-value');
+const urbanBasisValue = document.querySelector('#urban-basis-value');
+const spottingBasisValue = document.querySelector('#spotting-basis-value');
 const modelTimeValue = document.querySelector('#model-time-value');
 const burnedAreaValue = document.querySelector('#burned-area-value');
 const maxSpreadValue = document.querySelector('#max-spread-value');
@@ -112,14 +116,23 @@ const conditionPanel = document.querySelector('#condition-panel');
 const simulationPanel = document.querySelector('#simulation-panel');
 const hoverPausePanels = [conditionPanel, simulationPanel];
 
+// Block-scale retarget (scope change, not a mode toggle — see README §
+// "Block scale" and CLAUDE.md). Field is now 640 m at 10 m/cell, matching
+// ESA WorldCover's native resolution (worldCoverFine.js). Grid stays 64.
+// There is no accuracy claim at this scale: the 6-fire benchmark this model
+// is scored against runs 76k-151k acres; a 0.4 km² block is for legibility
+// of individual buildings/streets, not validated physics.
 const FIRE_GRID_SIZE = 64;
-const FIRE_CELL_SIZE_KM = 0.5;
+const FIRE_CELL_SIZE_KM = 0.01;
 const FIRE_FIELD_DIAMETER_KM = FIRE_GRID_SIZE * FIRE_CELL_SIZE_KM;
-// The model field is 32 km; this is a presentation enlargement only. The
+const FIRE_FIELD_DIAMETER_METERS = Math.round(FIRE_FIELD_DIAMETER_KM * 1000);
+// The model field is 640 m; this is a presentation enlargement only. The
 // shader masks the enlarged footprint against the real Earth texture so it
 // cannot paint over visible water.
 const FIRE_DISPLAY_SCALE = 24;
-const FIRE_MAX_PROPAGATION_HOURS = 72;
+// Block-scale default window: 120 minutes, not the regional model's 72 h.
+// A 640 m field cannot hold a multi-day run inside its own boundary anyway.
+const FIRE_MAX_PROPAGATION_HOURS = 2;
 const FIRE_GRID_CENTER = (FIRE_GRID_SIZE - 1) / 2;
 const MODEL_TIMESTEP_MINUTES = 1;
 const SIMULATION_SEED = 17;
@@ -195,18 +208,79 @@ scene.add(sunLight);
 // ─────────────────────────────────────────────────────────────
 // Groups
 // ─────────────────────────────────────────────────────────────
-const globeMeshes = [];
-const earthSpinGroup = new THREE.Group();
-scene.add(earthSpinGroup);
-let earthModel = null;
-let atmosphereMesh = null;
-let earthMaterial = null;
-let earthRadius = null;
+let globeReady = false;
+let pickedCoordinates = null;
+let cesiumGlobe = null;
+let fireDrape = null;
+// P3: fire is draped on the Cesium globe in place; no camera cut.
+const DRAPE_ON_GLOBE = true;
 
 const fireWorker = new Worker(new URL('./workers/fireWorker.js', import.meta.url), { type: 'module' });
-let fireOverlay = null;
+
+// Block scene: the globe stays the location picker; the camera drops into
+// this local scene on a successful ignite. Fire replay reads the
+// already-solved arrival-time field via setTime — never re-solves.
+let blockSceneInstance = null;
+let blockSceneActive = false;
+let liveModelMinutes = 0;
+const BLOCK_SCENE_CAMERA_DISTANCE = 500;
+// The globe/starfield/atmosphere live at world-unit scale in the hundreds
+// (starfield radius alone is 900). Offset the block scene far outside that
+// so dropping the camera in never shows the globe bleeding through.
+const BLOCK_SCENE_OFFSET = new THREE.Vector3(0, 8000, 0);
+
+function rebuildBlockScene(fuelField, urbanFootprints) {
+  blockSceneInstance?.dispose();
+  scene.remove(...(blockSceneInstance ? [blockSceneInstance.group] : []));
+  const burnableByCell = fuelField.fuelModelCodes.map((code) => code !== 'NB');
+  const fuelColors = buildFuelColorField({
+    gridSize: FIRE_GRID_SIZE,
+    fuelModelCodes: fuelField.fuelModelCodes,
+    burnableByCell,
+    urbanCells: urbanFootprints?.raster?.cells ?? null
+  });
+  blockSceneInstance = createBlockScene({
+    THREE,
+    gridSize: FIRE_GRID_SIZE,
+    cellSizeMeters: FIRE_CELL_SIZE_KM * 1000,
+    fuelCellColors: fuelColors,
+    buildings: urbanFootprints?.buildings ?? [],
+    roads: urbanFootprints?.roads ?? []
+  });
+  blockSceneInstance.group.position.copy(BLOCK_SCENE_OFFSET);
+  scene.add(blockSceneInstance.group);
+  blockSceneActive = true;
+  timelineScrub.disabled = false;
+  timelineScrub.max = String(FIRE_MAX_PROPAGATION_HOURS * 60);
+}
+
+function dropCameraIntoBlockScene() {
+  camera.position.copy(BLOCK_SCENE_OFFSET)
+    .add(new THREE.Vector3(0, BLOCK_SCENE_CAMERA_DISTANCE, BLOCK_SCENE_CAMERA_DISTANCE));
+  camera.near = 1;
+  camera.far = BLOCK_SCENE_OFFSET.length() + BLOCK_SCENE_CAMERA_DISTANCE * 10;
+  camera.updateProjectionMatrix();
+  controls.target.copy(BLOCK_SCENE_OFFSET);
+  controls.update();
+  cesiumGlobe?.setVisible(false);
+  canvas.style.display = '';
+}
+
+function restoreGlobeCamera() {
+  blockSceneActive = false;
+  if (blockSceneInstance) {
+    scene.remove(blockSceneInstance.group);
+    blockSceneInstance.dispose();
+    blockSceneInstance = null;
+  }
+  timelineScrub.disabled = true;
+  timelineScrub.value = '0';
+  timelineScrubValue.textContent = '0 min';
+  canvas.style.display = 'none';
+  cesiumGlobe?.setVisible(true);
+  fireDrape?.clear();
+}
 let fireTexture = null;
-let fireMaterial = null;
 let fireRunId = 0;
 let terrainRequestId = 0;
 let fireRunning = false;
@@ -222,6 +296,7 @@ let fractionalCoverStatus = 'Optional Copernicus layer';
 let canopyHeightStatus = 'Optional global canopy height';
 let globalFuelbedStatus = 'Global FCCS fuelbed fallback';
 let landfireFuelStatus = 'LANDFIRE FBFM40 unavailable · fallback';
+let urbanFootprintStatus = 'Not fetched';
 let ensembleMetadata = null;
 let scenarioEvidence = null;
 let lastWeather = null;
@@ -238,307 +313,6 @@ function isMappedWaterAtLatLon(latitude, longitude) {
     || landCoverSource?.isWaterAtLatLon?.(latitude, longitude) === true;
 }
 
-// ─────────────────────────────────────────────────────────────
-// Starfield — procedural, spherical distribution, gentle twinkle
-// ─────────────────────────────────────────────────────────────
-function createStarfield(count = 4200, radius = 900) {
-  const positions = new Float32Array(count * 3);
-  const sizes = new Float32Array(count);
-  const phases = new Float32Array(count);
-  const brightness = new Float32Array(count);
-
-  for (let i = 0; i < count; i += 1) {
-    // Uniform spherical distribution
-    const u = Math.random();
-    const v = Math.random();
-    const theta = 2 * Math.PI * u;
-    const phi = Math.acos(2 * v - 1);
-    const r = radius * (0.85 + Math.random() * 0.15);
-    positions[i * 3 + 0] = r * Math.sin(phi) * Math.cos(theta);
-    positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
-    positions[i * 3 + 2] = r * Math.cos(phi);
-
-    // Weighted so the vast majority are small; a few are noticeably bright
-    const rank = Math.pow(Math.random(), 4);
-    sizes[i] = 1.4 + rank * 5.6;
-    brightness[i] = 0.35 + Math.pow(Math.random(), 2.2) * 0.65;
-    phases[i] = Math.random() * Math.PI * 2;
-  }
-
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geometry.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
-  geometry.setAttribute('aPhase', new THREE.BufferAttribute(phases, 1));
-  geometry.setAttribute('aBrightness', new THREE.BufferAttribute(brightness, 1));
-
-  const material = new THREE.ShaderMaterial({
-    transparent: true,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending,
-    uniforms: {
-      uTime: { value: 0 },
-      uPixelRatio: { value: renderer.getPixelRatio() }
-    },
-    vertexShader: /* glsl */`
-      attribute float aSize;
-      attribute float aPhase;
-      attribute float aBrightness;
-      uniform float uTime;
-      uniform float uPixelRatio;
-      varying float vTwinkle;
-      varying float vBrightness;
-      void main() {
-        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-        // Slow, per-star sinusoidal twinkle
-        vTwinkle = 0.65 + 0.35 * sin(uTime * 1.1 + aPhase);
-        vBrightness = aBrightness;
-        gl_PointSize = aSize * uPixelRatio * (240.0 / -mvPosition.z) * (0.75 + 0.25 * vTwinkle);
-        gl_Position = projectionMatrix * mvPosition;
-      }
-    `,
-    fragmentShader: /* glsl */`
-      varying float vTwinkle;
-      varying float vBrightness;
-      void main() {
-        vec2 c = gl_PointCoord - vec2(0.5);
-        float d = length(c);
-        if (d > 0.5) discard;
-        // Soft disc with a hot core
-        float a = smoothstep(0.5, 0.0, d);
-        float core = smoothstep(0.18, 0.0, d) * 0.6;
-        float alpha = (a * (0.45 + 0.55 * vTwinkle) + core) * vBrightness;
-        // Slight warm cream so stars don't read as pure white
-        vec3 color = vec3(1.0, 0.965, 0.9);
-        gl_FragColor = vec4(color, alpha);
-      }
-    `
-  });
-
-  return new THREE.Points(geometry, material);
-}
-
-const starfield = createStarfield();
-starfield.frustumCulled = false;
-scene.add(starfield);
-
-// ─────────────────────────────────────────────────────────────
-// Atmospheric halo — fresnel rim, breathes almost imperceptibly
-// ─────────────────────────────────────────────────────────────
-function createAtmosphere(radius) {
-  const geometry = new THREE.SphereGeometry(radius * 1.025, 96, 96);
-  const material = new THREE.ShaderMaterial({
-    side: THREE.BackSide,
-    transparent: true,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending,
-    uniforms: {
-      uTime: { value: 0 },
-      uSunDirection: { value: SUN_DIRECTION.clone() },
-      uColor: { value: new THREE.Color(0x6fa8ff) },
-      uWarmColor: { value: new THREE.Color(0xff9a4f) },
-      uIntensity: { value: 0.65 }
-    },
-    vertexShader: /* glsl */`
-      varying vec3 vWorldNormal;
-      varying vec3 vWorldPosition;
-      void main() {
-        vec4 worldPosition = modelMatrix * vec4(position, 1.0);
-        vWorldPosition = worldPosition.xyz;
-        vWorldNormal = normalize(mat3(modelMatrix) * normal);
-        gl_Position = projectionMatrix * viewMatrix * worldPosition;
-      }
-    `,
-    fragmentShader: /* glsl */`
-      varying vec3 vWorldNormal;
-      varying vec3 vWorldPosition;
-      uniform vec3 uSunDirection;
-      uniform vec3 uColor;
-      uniform vec3 uWarmColor;
-      uniform float uIntensity;
-      uniform float uTime;
-      void main() {
-        vec3 viewDir = normalize(cameraPosition - vWorldPosition);
-        vec3 n = -vWorldNormal;
-        // Tight fresnel — rim only, no fill
-        float rim = pow(1.0 - max(dot(viewDir, n), 0.0), 4.5);
-        // Sun-facing rim is brighter; back side keeps a slight wisp
-        float sunFacing = clamp(dot(n, uSunDirection) * 0.5 + 0.5, 0.0, 1.0);
-        float dayGlow = mix(0.28, 1.0, pow(sunFacing, 1.4));
-        // Narrow twilight warmth right at the terminator
-        float terminator = exp(-pow((sunFacing - 0.5) * 6.5, 2.0));
-        vec3 col = mix(uColor, uWarmColor, terminator * 0.65);
-        float breathe = 0.95 + 0.05 * sin(uTime * 0.35);
-        float alpha = rim * dayGlow * uIntensity * breathe;
-        gl_FragColor = vec4(col, 1.0) * alpha;
-      }
-    `
-  });
-
-  return new THREE.Mesh(geometry, material);
-}
-
-// ─────────────────────────────────────────────────────────────
-// Earth material — custom shader with day/night terminator
-// ─────────────────────────────────────────────────────────────
-function createEarthMaterial(dayMap) {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      uDayMap: { value: dayMap },
-      uSunDirection: { value: SUN_DIRECTION.clone() },
-      uNightTint: { value: new THREE.Color(0x0b1c3a) },       // cold blue night
-      uTwilightTint: { value: new THREE.Color(0xff8438) },    // warm terminator glow
-      uNightBrightness: { value: 0.04 }
-    },
-    vertexShader: /* glsl */`
-      varying vec2 vUv;
-      varying vec3 vWorldNormal;
-      void main() {
-        vUv = uv;
-        vWorldNormal = normalize(mat3(modelMatrix) * normal);
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-      }
-    `,
-    fragmentShader: /* glsl */`
-      uniform sampler2D uDayMap;
-      uniform vec3 uSunDirection;
-      uniform vec3 uNightTint;
-      uniform vec3 uTwilightTint;
-      uniform float uNightBrightness;
-      varying vec2 vUv;
-      varying vec3 vWorldNormal;
-
-      // Manual sRGB → linear so the texture matches the rest of the pipeline
-      vec3 srgbToLinear(vec3 c) {
-        return pow(c, vec3(2.2));
-      }
-
-      void main() {
-        vec3 dayLinear = srgbToLinear(texture2D(uDayMap, vUv).rgb);
-        float sun = dot(normalize(vWorldNormal), uSunDirection);
-
-        // Soft day/night blend
-        float dayAmount = smoothstep(-0.06, 0.18, sun);
-
-        // Lit day: gentle Lambertian falloff so the terminator side is dimmer
-        float lightAmount = 0.55 + 0.9 * clamp(sun, 0.0, 1.0);
-        vec3 dayLit = dayLinear * lightAmount * 2.1;
-
-        // Night side: mostly the cold night tint plus a hint of the map
-        vec3 night = uNightTint * 0.9 + dayLinear * uNightBrightness;
-
-        // Narrow terminator warmth — a soft crescent, not a band
-        float terminator = exp(-pow(sun * 14.0, 2.0));
-        vec3 warmth = uTwilightTint * terminator * 0.14;
-
-        vec3 color = mix(night, dayLit, dayAmount) + warmth;
-        gl_FragColor = vec4(color, 1.0);
-      }
-    `
-  });
-}
-
-// ─────────────────────────────────────────────────────────────
-// Ember marker + radar ping — the "ignition point"
-// ─────────────────────────────────────────────────────────────
-function createEmberTexture(colorInner, colorOuter) {
-  const size = 128;
-  const canvasEl = document.createElement('canvas');
-  canvasEl.width = size;
-  canvasEl.height = size;
-  const ctx = canvasEl.getContext('2d');
-  const gradient = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
-  gradient.addColorStop(0.0, colorInner);
-  gradient.addColorStop(0.35, colorOuter);
-  gradient.addColorStop(1.0, 'rgba(255, 140, 40, 0)');
-  ctx.fillStyle = gradient;
-  ctx.fillRect(0, 0, size, size);
-  const texture = new THREE.CanvasTexture(canvasEl);
-  texture.colorSpace = THREE.SRGBColorSpace;
-  return texture;
-}
-
-const emberCoreTexture = createEmberTexture('rgba(255, 240, 205, 1)', 'rgba(255, 165, 60, 0.9)');
-const emberGlowTexture = createEmberTexture('rgba(255, 180, 90, 0.8)', 'rgba(255, 100, 20, 0.35)');
-
-let markerGroup = null;
-let markerSurfacePoint = new THREE.Vector3();
-const activePings = [];
-
-function ensureMarker() {
-  if (markerGroup) return markerGroup;
-
-  markerGroup = new THREE.Group();
-  markerGroup.renderOrder = 10;
-
-  const glow = new THREE.Sprite(new THREE.SpriteMaterial({
-    map: emberGlowTexture,
-    color: 0xffffff,
-    transparent: true,
-    depthTest: false,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending,
-    opacity: 1
-  }));
-  glow.userData.role = 'glow';
-  glow.userData.baseScale = 1.0;
-  markerGroup.add(glow);
-
-  const core = new THREE.Sprite(new THREE.SpriteMaterial({
-    map: emberCoreTexture,
-    color: 0xffffff,
-    transparent: true,
-    depthTest: false,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending,
-    opacity: 1
-  }));
-  core.userData.role = 'core';
-  core.userData.baseScale = 0.32;
-  markerGroup.add(core);
-
-  earthSpinGroup.add(markerGroup);
-  return markerGroup;
-}
-
-function launchPingRing() {
-  if (!markerGroup) return;
-  const geometry = new THREE.RingGeometry(0.62, 0.72, 96);
-  const material = new THREE.MeshBasicMaterial({
-    color: 0xffa14b,
-    transparent: true,
-    depthTest: false,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-    opacity: 1
-  });
-  const ring = new THREE.Mesh(geometry, material);
-  ring.renderOrder = 11;
-  ring.userData.role = 'ping';
-  ring.userData.startTime = performance.now();
-  ring.userData.lifetime = 1400;
-  ring.userData.baseScale = 1;
-  markerGroup.add(ring);
-  activePings.push(ring);
-}
-
-function updatePings(now) {
-  for (let i = activePings.length - 1; i >= 0; i -= 1) {
-    const ring = activePings[i];
-    const t = (now - ring.userData.startTime) / ring.userData.lifetime;
-    if (t >= 1) {
-      markerGroup?.remove(ring);
-      ring.geometry.dispose();
-      ring.material.dispose();
-      activePings.splice(i, 1);
-      continue;
-    }
-    // Exponential ease-out expansion, opacity fades faster
-    const eased = 1 - Math.pow(1 - t, 3);
-    const scale = 1 + eased * 4.5;
-    ring.userData.baseScale = scale;
-    ring.material.opacity = (1 - t) * (1 - t) * 0.9;
-  }
-}
 
 // ─────────────────────────────────────────────────────────────
 // Camera controls & interaction state
@@ -548,62 +322,17 @@ controls.enableDamping = true;
 controls.enableRotate = false;
 controls.enablePan = false;
 controls.zoomToCursor = false;
-let referenceCameraDistance = camera.position.distanceTo(controls.target);
-
-const raycaster = new THREE.Raycaster();
-const pointer = new THREE.Vector2();
-let pointerDown = null;
-let isDraggingEarth = false;
-let suppressNextClick = false;
-let pointerOverCanvas = false;
-let resumeRotationWhileHovered = false;
 const earthClock = new THREE.Clock();
-const AUTO_ROTATION_SPEED = 0.075;
-const manualAngularVelocity = new THREE.Vector2();
 
 // ─────────────────────────────────────────────────────────────
-// Texture & model load
+// Terrain sampler — land/ocean classification independent of any
+// rendering path. Cesium owns the visible imagery now; this loads the same
+// source image directly for pixel-level water classification.
 // ─────────────────────────────────────────────────────────────
-const dayTexture = new THREE.TextureLoader().load('/earth/textures/1_earth_8k.jpg', () => {
-  loadingEl?.classList.add('is-map-ready');
-});
-dayTexture.colorSpace = THREE.SRGBColorSpace;
-dayTexture.flipY = true;
-dayTexture.anisotropy = renderer.capabilities.getMaxAnisotropy();
-dayTexture.wrapS = THREE.RepeatWrapping;
-dayTexture.wrapT = THREE.ClampToEdgeWrapping;
-
-// Ground truth for land/ocean classification: reads the same texture pixels
-// being rendered, so a click can never be told it's ocean when the visible
-// pixel is land (or vice versa). Loads in parallel with the FBX model.
 let terrainSampler = null;
-const fallbackWaterMaskTexture = new THREE.DataTexture(
-  new Uint8Array([0]),
-  1,
-  1,
-  THREE.RedFormat,
-  THREE.UnsignedByteType
-);
-fallbackWaterMaskTexture.needsUpdate = true;
-let waterMaskTexture = fallbackWaterMaskTexture;
 createTerrainSampler('/earth/textures/1_earth_8k.jpg', { sampleWidth: 4096, sampleHeight: 2048 })
   .then((sampler) => {
     terrainSampler = sampler;
-    const oldWaterMaskTexture = waterMaskTexture;
-    waterMaskTexture = new THREE.DataTexture(
-      sampler.waterMaskData,
-      sampler.resolution.width,
-      sampler.resolution.height,
-      THREE.RedFormat,
-      THREE.UnsignedByteType
-    );
-    waterMaskTexture.flipY = true;
-    waterMaskTexture.needsUpdate = true;
-    if (oldWaterMaskTexture !== waterMaskTexture) oldWaterMaskTexture.dispose();
-    if (fireMaterial) {
-      fireMaterial.uniforms.uWaterMask.value = waterMaskTexture;
-      fireMaterial.uniforms.uWaterMaskReady.value = 1;
-    }
   })
   .catch((error) => console.error('[terrain] sampler failed to load:', error));
 
@@ -688,12 +417,46 @@ async function fetchCopernicusLandCoverAtLatLon(latitude, longitude) {
   }
 }
 
+// At the block-scale 10 m cell size the model cell *is* one WorldCover
+// pixel: WORLD_COVER_FINE_SAMPLE_OFFSETS' 4x4 subsample grid was sized to
+// spread across a 500 m cell and would now land 16 samples inside one
+// 10 m pixel. Sample the cell centre once and skip the majority vote —
+// there is nothing to vote between.
+const BLOCK_SCALE_SAMPLE_OFFSETS = Object.freeze([0]);
+
+async function fetchUrbanFootprintsField(grid) {
+  const bbox = gridBbox(grid);
+  if (!bbox) {
+    urbanFootprintStatus = 'Not fetched';
+    return { available: false, buildings: [], roads: [], green: [], raster: null };
+  }
+  try {
+    const result = await fetchUrbanFootprintsForBbox(
+      [bbox[1], bbox[0], bbox[3], bbox[2]],
+      {
+        originLatitude: grid.origin.latitude,
+        originLongitude: grid.origin.longitude,
+        gridSize: grid.gridSize,
+        cellSizeMeters: grid.cellSizeMeters
+      }
+    );
+    urbanFootprintStatus = result.available
+      ? `OSM Overpass · ${result.raster?.summary.buildingCells ?? 0} building / ${result.raster?.summary.roadCells ?? 0} road cells`
+      : 'OSM Overpass unavailable · WorldCover only';
+    return result;
+  } catch (error) {
+    console.info('[urban] footprints unavailable:', error?.message ?? error);
+    urbanFootprintStatus = 'OSM Overpass unavailable · WorldCover only';
+    return { available: false, buildings: [], roads: [], green: [], raster: null };
+  }
+}
+
 async function fetchFineLandCoverField(grid) {
   const samples = [];
   for (let row = 0; row < grid.gridSize; row += 1) {
     for (let col = 0; col < grid.gridSize; col += 1) {
-      for (const rowOffset of WORLD_COVER_FINE_SAMPLE_OFFSETS) {
-        for (const colOffset of WORLD_COVER_FINE_SAMPLE_OFFSETS) {
+      for (const rowOffset of BLOCK_SCALE_SAMPLE_OFFSETS) {
+        for (const colOffset of BLOCK_SCALE_SAMPLE_OFFSETS) {
           const { latitude, longitude } = grid.cellCenterLatLon(row + rowOffset, col + colOffset);
           samples.push({ latitude, longitude });
         }
@@ -735,14 +498,16 @@ async function fetchFineLandCoverField(grid) {
     if (successfulBatchCount === 0) {
       throw new Error('fine field returned no successful batches');
     }
+    // samplesPerCell = 1: this degenerates aggregateWorldCoverFineSamples's
+    // majority vote into a direct pass-through of the single centre sample.
     const aggregatedClassifications = aggregateWorldCoverFineSamples(classifications, {
       gridSize: grid.gridSize,
-      samplesPerCell: WORLD_COVER_FINE_SAMPLES_PER_CELL
+      samplesPerCell: BLOCK_SCALE_SAMPLE_OFFSETS.length ** 2
     });
     const coverageLabel = coverage.complete
       ? 'complete'
       : `${Math.round(coverage.sampleCoverageFraction * 100)}% samples · ${coverage.successfulBatchCount}/${coverage.totalBatchCount} batches`;
-    fineLandCoverStatus = `WorldCover 10 m COG · ${WORLD_COVER_FINE_SAMPLES_PER_CELL} samples/cell · ${coverageLabel}`;
+    fineLandCoverStatus = `WorldCover 10 m COG (native) · 1 centre sample/cell · ${coverageLabel}`;
     return {
       classifications: aggregatedClassifications,
       sampleClassifications: classifications,
@@ -1100,77 +865,33 @@ function loadImageElement(url) {
 }
 loadLandCoverSource();
 
-const fbxLoader = new FBXLoader();
-fbxLoader.load(
-  '/earth/source/Earth.fbx',
-  (model) => {
-    earthModel = model;
-    earthMaterial = createEarthMaterial(dayTexture);
-    model.traverse((child) => {
-      if (!child.isMesh) return;
-      child.material = earthMaterial;
-      child.frustumCulled = false;
-      globeMeshes.push(child);
-    });
-
-    earthSpinGroup.add(model);
-    frameModel(model);
-
-    // Atmosphere: sized from the actual sphere radius (world-space, after framing)
-    model.updateMatrixWorld(true);
-    const box = new THREE.Box3().setFromObject(model);
-    const size = new THREE.Vector3();
-    box.getSize(size);
-    // For a sphere mesh, x/y/z should be equal (or close). Use the max half-extent.
-    earthRadius = Math.max(size.x, size.y, size.z) * 0.5;
-    atmosphereMesh = createAtmosphere(earthRadius);
-    earthSpinGroup.add(atmosphereMesh);
-
-    if (loadingEl) {
-      loadingEl.style.opacity = '0';
-      setTimeout(() => loadingEl.remove(), 320);
-    }
-  },
-  (event) => {
-    if (event.total > 0 && loadingEl) {
-      const pct = Math.round((event.loaded / event.total) * 100);
-      loadingEl.textContent = `Loading terrain · ${pct}%`;
-    }
-  },
-  () => {
-    if (loadingEl) loadingEl.textContent = 'Terrain load failed';
-  }
-);
+canvas.style.display = 'none';
+try {
+  cesiumGlobe = initCesiumGlobe();
+  fireDrape = createFireOverlay(cesiumGlobe.viewer);
+  globeReady = true;
+  if (import.meta.env.DEV) window.__ignis = { viewer: cesiumGlobe.viewer, fireDrape };
+  cesiumGlobe.onGlobeClick(({ lat, lon }) => handleGlobeClick(lat, lon));
+} catch (error) {
+  console.error('[main] Cesium globe failed to initialize — clicks will not work:', error);
+}
+if (loadingEl) {
+  loadingEl.style.opacity = '0';
+  setTimeout(() => loadingEl.remove(), 320);
+}
 
 // ─────────────────────────────────────────────────────────────
 // Selection
 // ─────────────────────────────────────────────────────────────
-function handleGlobeClick(event) {
-  if (globeMeshes.length === 0) return;
-
-  const rect = renderer.domElement.getBoundingClientRect();
-  pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-  pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-  raycaster.setFromCamera(pointer, camera);
-
-  const [hit] = raycaster.intersectObjects(globeMeshes, true);
-  if (!hit) return;
-
-  const localHitPoint = earthSpinGroup.worldToLocal(hit.point.clone());
-  const coordinates = cartesianToLatitudeLongitude(localHitPoint);
-  // hit.uv is the exact texture coordinate the fragment shader used to
-  // paint this pixel — reading it here ties the land/ocean call directly
-  // to what's on screen, with zero risk of drifting from a separate
-  // lat/lng-based recomputation.
-  const isOcean = terrainSampler && hit.uv
-    ? terrainSampler.isOceanAtUv(hit.uv.x, hit.uv.y)
-    : null;
+function handleGlobeClick(lat, lon) {
+  if (!globeReady) return;
+  const coordinates = { latitude: lat, longitude: lon };
+  const isOcean = terrainSampler ? terrainSampler.isWaterAtLatLon(lat, lon) : null;
 
   updateConditionPanel(coordinates, isOcean);
 
   if (!canIgniteSurface(isOcean)) {
     resetFireSimulation();
-    if (markerGroup) markerGroup.visible = false;
     panelStatus.dataset.mode = 'blocked';
     statusText.textContent = surfaceIgnitionMessage(isOcean);
     simulationReadout.textContent = isOcean === true
@@ -1208,7 +929,6 @@ function handleGlobeClick(event) {
 
   if (!canIgniteFuelDecision(fuelDecision)) {
     resetFireSimulation();
-    if (markerGroup) markerGroup.visible = false;
     panelStatus.dataset.mode = 'blocked';
     statusText.textContent = 'Non-burnable surface · no ignition';
     simulationReadout.textContent = 'Select a burnable land surface';
@@ -1217,8 +937,25 @@ function handleGlobeClick(event) {
     return;
   }
 
-  placeMarker(localHitPoint);
+  pickedCoordinates = coordinates;
   startFireSimulation(coordinates);
+
+  // P3: real WorldCover + OSM ignition, draped onto the globe in place. The
+  // block-scene run above still drives the timeline clock and metrics panels.
+  runFromClick({ lat, lon }).then((result) => {
+    const burned = result.arrivalMinutes.reduce((n, v) => n + (Number.isFinite(v) ? 1 : 0), 0);
+    console.info('[runFromClick]', `${burned}/${result.fuelCodes.length} cells burned`,
+      `· ${result.buildings.length} buildings · ${result.roads.length} road segments`, result.provenance);
+    if (DRAPE_ON_GLOBE) {
+      // Tilted aerial framing over the bbox centre — never top-down.
+      cesiumGlobe?.flyToAerial({
+        latitude: (result.bbox[1] + result.bbox[3]) / 2,
+        longitude: (result.bbox[0] + result.bbox[2]) / 2
+      });
+      fireDrape?.show(result);
+      fireDrape?.setTime(liveModelMinutes);
+    }
+  }).catch((error) => console.warn('[runFromClick] failed:', error));
 }
 
 function updateConditionPanel(coordinates, isOcean) {
@@ -1241,118 +978,8 @@ function formatCoord(value, axis) {
   return `${degrees.toString().padStart(axis === 'lat' ? 2 : 3, '0')}° ${minutes.toFixed(3).padStart(6, '0')}′ ${hemisphere}`;
 }
 
-function placeMarker(point) {
-  ensureMarker();
-  markerSurfacePoint.copy(point);
-  markerGroup.position.copy(point.clone().normalize().multiplyScalar(point.length() * 1.002));
-  markerGroup.userData.placedAt = performance.now();
-  updateMarker();
-  launchPingRing();
-}
-
-function updateMarker() {
-  if (!markerGroup) return;
-  earthSpinGroup.updateMatrixWorld(true);
-
-  const cameraDistance = camera.position.length();
-  const zoomRatio = cameraDistance / referenceCameraDistance;
-  const zoomScale = THREE.MathUtils.clamp(Math.pow(zoomRatio, 1.2), 0.4, 4.2);
-  const surfaceRadius = markerSurfacePoint.length();
-  const worldScale = surfaceRadius * 0.028 * zoomScale;
-
-  // Ember breathing
-  const time = performance.now() * 0.001;
-  const breathe = 0.85 + 0.15 * Math.sin(time * 2.1);
-
-  markerGroup.children.forEach((child) => {
-    if (child.userData.role === 'glow') {
-      const s = worldScale * 2.6 * breathe;
-      child.scale.set(s, s, 1);
-      child.material.opacity = 0.85 * (0.75 + 0.25 * breathe);
-    } else if (child.userData.role === 'core') {
-      const s = worldScale * 0.55 * (0.9 + 0.1 * breathe);
-      child.scale.set(s, s, 1);
-    } else if (child.userData.role === 'ping') {
-      const s = worldScale * 1.4 * (child.userData.baseScale ?? 1);
-      child.scale.set(s, s, 1);
-      // Orient the ping flat against the sphere surface
-      const outward = markerSurfacePoint.clone().normalize();
-      const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), outward);
-      child.quaternion.copy(quat);
-    }
-  });
-
-  // Face the camera (sprites do this automatically; this handles the ring group)
-  const markerWorldPosition = markerGroup.getWorldPosition(new THREE.Vector3());
-  const outward = markerSurfacePoint.clone()
-    .normalize()
-    .transformDirection(earthSpinGroup.matrixWorld);
-  const towardCamera = camera.position.clone().sub(markerWorldPosition).normalize();
-  // Hide when facing away, with a small tolerance for the ping halo
-  markerGroup.visible = outward.dot(towardCamera) > -0.08;
-}
-
-function createFireOverlay(surfacePoint, radius) {
-  if (fireOverlay) {
-    earthSpinGroup.remove(fireOverlay);
-    fireOverlay.geometry.dispose();
-    fireOverlay.material.dispose();
-  }
+function createFireDataTexture() {
   fireTexture?.dispose();
-
-  const segments = 72;
-  const patchRadius = radius * (FIRE_FIELD_DIAMETER_KM / (2 * EARTH_RADIUS_KM)) * FIRE_DISPLAY_SCALE;
-  const normal = surfacePoint.clone().normalize();
-  const reference = Math.abs(normal.y) < 0.9
-    ? new THREE.Vector3(0, 1, 0)
-    : new THREE.Vector3(1, 0, 0);
-  const east = new THREE.Vector3().crossVectors(reference, normal).normalize();
-  const north = new THREE.Vector3().crossVectors(normal, east).normalize();
-  const positions = [];
-  const uvs = [];
-  const earthUvs = [];
-  const indices = [];
-
-  for (let y = 0; y <= segments; y += 1) {
-    for (let x = 0; x <= segments; x += 1) {
-      const offsetX = (x / segments - 0.5) * patchRadius * 2;
-      const offsetY = (y / segments - 0.5) * patchRadius * 2;
-      const distance = Math.hypot(offsetX, offsetY);
-      const tangent = new THREE.Vector3()
-        .addScaledVector(east, offsetX)
-        .addScaledVector(north, offsetY);
-      const direction = distance > 0 ? tangent.normalize() : east;
-      const angle = distance / radius;
-      const point = normal.clone()
-        .multiplyScalar(Math.cos(angle))
-        .addScaledVector(direction, Math.sin(angle))
-        .multiplyScalar(radius * 1.006);
-      positions.push(point.x, point.y, point.z);
-      uvs.push(x / segments, 1 - y / segments);
-      const pointCoordinates = cartesianToLatitudeLongitude(point);
-      const earthUv = latitudeLongitudeToEarthUv(pointCoordinates.latitude, pointCoordinates.longitude);
-      earthUvs.push(earthUv.u, earthUv.v);
-    }
-  }
-
-  for (let y = 0; y < segments; y += 1) {
-    for (let x = 0; x < segments; x += 1) {
-      const row = segments + 1;
-      const a = y * row + x;
-      const b = a + 1;
-      const c = a + row;
-      const d = c + 1;
-      indices.push(a, c, b, b, c, d);
-    }
-  }
-
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
-  geometry.setAttribute('aEarthUv', new THREE.Float32BufferAttribute(earthUvs, 2));
-  geometry.setIndex(indices);
-  geometry.computeVertexNormals();
-
   fireTexture = new THREE.DataTexture(
     new Uint8Array(FIRE_GRID_SIZE * FIRE_GRID_SIZE * 4),
     FIRE_GRID_SIZE,
@@ -1365,75 +992,9 @@ function createFireOverlay(surfacePoint, radius) {
   fireTexture.wrapS = THREE.ClampToEdgeWrapping;
   fireTexture.wrapT = THREE.ClampToEdgeWrapping;
   fireTexture.needsUpdate = true;
-
-  fireMaterial = new THREE.ShaderMaterial({
-    uniforms: {
-      uFireMap: { value: fireTexture },
-      uDayMap: { value: dayTexture },
-      uWaterMask: { value: waterMaskTexture },
-      uWaterMaskReady: { value: terrainSampler ? 1 : 0 },
-      uTime: { value: 0 }
-    },
-    transparent: true,
-    depthTest: true,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-    blending: THREE.AdditiveBlending,
-    vertexShader: /* glsl */`
-      varying vec2 vUv;
-      attribute vec2 aEarthUv;
-      varying vec2 vEarthUv;
-      varying vec3 vWorldPosition;
-      void main() {
-        vUv = uv;
-        vEarthUv = aEarthUv;
-        vec4 worldPosition = modelMatrix * vec4(position, 1.0);
-        vWorldPosition = worldPosition.xyz;
-        gl_Position = projectionMatrix * viewMatrix * worldPosition;
-      }
-    `,
-    fragmentShader: /* glsl */`
-      uniform sampler2D uFireMap;
-      uniform sampler2D uDayMap;
-      uniform sampler2D uWaterMask;
-      uniform float uWaterMaskReady;
-      uniform float uTime;
-      varying vec2 vUv;
-      varying vec2 vEarthUv;
-      varying vec3 vWorldPosition;
-      void main() {
-        vec4 fire = texture2D(uFireMap, vUv);
-        vec3 surface = texture2D(uDayMap, vEarthUv).rgb;
-        float waterScore = surface.b - max(surface.r, surface.g);
-        bool textureWater = surface.b * 255.0 >= ${WATER_BLUE_MIN}.0
-          && waterScore * 255.0 > ${WATER_BLUE_MARGIN}.0;
-        bool sampledWater = uWaterMaskReady > 0.5 && texture2D(uWaterMask, vEarthUv).r > 0.5;
-        // Keep the visible day texture as a second hard veto even after the
-        // auxiliary mask loads. This prevents a mask upload/orientation
-        // mismatch from showing fire over visibly blue water.
-        if (sampledWater || textureWater) discard;
-        vec2 texel = vec2(1.0 / ${FIRE_GRID_SIZE}.0);
-        float neighborAlpha = min(
-          min(texture2D(uFireMap, vUv + vec2(texel.x, 0.0)).a, texture2D(uFireMap, vUv - vec2(texel.x, 0.0)).a),
-          min(texture2D(uFireMap, vUv + vec2(0.0, texel.y)).a, texture2D(uFireMap, vUv - vec2(0.0, texel.y)).a)
-        );
-        float perimeter = smoothstep(0.04, 0.22, fire.a) * (1.0 - smoothstep(0.03, 0.2, neighborAlpha));
-        float pulse = 0.92 + 0.08 * sin(uTime * 5.5 + vUv.x * 12.0 + vUv.y * 8.0);
-        float edgeFade = smoothstep(0.0, 0.08, vUv.x) * smoothstep(1.0, 0.92, vUv.x)
-          * smoothstep(0.0, 0.08, vUv.y) * smoothstep(1.0, 0.92, vUv.y);
-        vec3 perimeterColor = vec3(1.0, 0.56, 0.08);
-        vec3 color = mix(fire.rgb, perimeterColor, perimeter * 0.72);
-        float alpha = max(fire.a, perimeter * 0.8);
-        gl_FragColor = vec4(color * pulse * 1.25, alpha * pulse * edgeFade);
-      }
-    `
-  });
-
-  fireOverlay = new THREE.Mesh(geometry, fireMaterial);
-  fireOverlay.renderOrder = 8;
-  earthSpinGroup.add(fireOverlay);
-  return fireOverlay;
+  return fireTexture;
 }
+
 
 function getSimulationParams() {
   return {
@@ -1541,7 +1102,11 @@ function updateScenarioMetadata() {
     ? `Herb ${Math.round(estimatedLiveMoisture.herbaceous * 100)}% · woody ${Math.round(estimatedLiveMoisture.woody * 100)}%`
     : `${liveMoistureInput.value}% manual`;
   slopeBasisValue.textContent = `${slopeInput.value}%`;
-  scaleValue.textContent = `${FIRE_CELL_SIZE_KM} km cells · ${FIRE_FIELD_DIAMETER_KM} km field`;
+  const cellSizeMetersLabel = Math.round(FIRE_CELL_SIZE_KM * 1000);
+  const fieldSizeMetersLabel = Math.round(FIRE_FIELD_DIAMETER_KM * 1000);
+  scaleValue.textContent = `Block scale · ${cellSizeMetersLabel} m cells · ${fieldSizeMetersLabel} m field`;
+  urbanBasisValue.textContent = urbanFootprintStatus;
+  spottingBasisValue.textContent = 'Off · field narrower than max ember flight distance';
   seedValue.textContent = String(SIMULATION_SEED);
   uncertaintyBasisValue.textContent = params.useUncertaintyEnsemble
     ? (ensembleMetadata
@@ -1550,7 +1115,7 @@ function updateScenarioMetadata() {
     : 'Deterministic';
   evidenceProfileValue.textContent = formatScenarioEvidence(scenarioEvidence);
   metadataState.textContent = terrainMetadataStatus;
-  guideScale.textContent = `${FIRE_FIELD_DIAMETER_KM} km field`;
+  guideScale.textContent = `${Math.round(FIRE_FIELD_DIAMETER_KM * 1000)} m field`;
 }
 
 // Keep the selected scenario label alongside the location-derived WorldCover
@@ -1579,11 +1144,11 @@ function formatFuelBasisLabel(legacyDropdownLabel) {
   return `${legacyDropdownLabel} · WC ${wcName} → ${lastFuelDecision.fuelCode} (${confidence})${scale}${fractional}${alternatives}${global}${regional}`;
 }
 
-function formatSignedMetric(value, unit) {
-  const rounded = Math.round(Number(value) || 0);
-  if (rounded === 0) return '— vs prior';
-  const sign = rounded > 0 ? '+' : '';
-  return `${sign}${rounded.toLocaleString()} ${unit} vs prior`;
+function formatSignedAreaMetric(value) {
+  const delta = Number(value) || 0;
+  if (Math.round(delta * 1_000_000) === 0) return '— vs prior';
+  const sign = delta > 0 ? '+' : '-';
+  return `${sign}${formatAreaMetric(Math.abs(delta))} burned vs prior`;
 }
 
 function createHistoryMetric(label, value) {
@@ -1629,16 +1194,16 @@ function renderScenarioHistory() {
     metrics.className = 'history-metrics';
     const data = record.metrics || {};
     metrics.append(
-      createHistoryMetric('Burned', `${Math.round(data.burnedAreaKm2 ?? 0).toLocaleString()} km²`),
+      createHistoryMetric('Burned', formatAreaMetric(data.burnedAreaKm2 ?? 0)),
       createHistoryMetric('Time', formatModelTime(data.elapsedMinutes ?? 0)),
-      createHistoryMetric('Spread', `${Number(data.maxSpreadDistanceKm ?? 0).toFixed(1)} km`)
+      createHistoryMetric('Spread', formatDistanceMetric(data.maxSpreadDistanceKm ?? 0))
     );
     card.append(header, basis, metrics);
     if (scenarioRecords[index + 1]) {
       const delta = compareScenarioMetrics(scenarioRecords[index + 1].metrics, data);
       const deltaLine = document.createElement('span');
       deltaLine.className = 'history-delta';
-      deltaLine.textContent = formatSignedMetric(delta.burnedAreaKm2, 'km² burned');
+      deltaLine.textContent = formatSignedAreaMetric(delta.burnedAreaKm2);
       card.append(deltaLine);
     }
     runHistoryList.append(card);
@@ -1687,7 +1252,7 @@ function recordSettledScenario(metrics) {
 }
 
 function replayScenario(record) {
-  if (!earthRadius || !record?.coordinates) return;
+  if (!globeReady || !record?.coordinates) return;
   const params = record.params ?? {};
   scenarioSelect.value = record.scenario ?? 'calm';
   fuelSelect.value = params.fuelPreset ?? 'brush';
@@ -1698,15 +1263,13 @@ function replayScenario(record) {
   slopeInput.value = String(Math.round((params.slopeStrength ?? 0) * 100));
   if (uncertaintyToggle) uncertaintyToggle.checked = params.useUncertaintyEnsemble === true;
   updateSimulationLabels();
-  const point = latitudeLongitudeToCartesian({ ...record.coordinates, radius: earthRadius });
-  const localPoint = new THREE.Vector3(point.x, point.y, point.z);
   updateConditionPanel(record.coordinates, false);
-  placeMarker(localPoint);
+  pickedCoordinates = record.coordinates;
   startFireSimulation(record.coordinates);
 }
 
 async function startFireSimulation(coordinates) {
-  if (!earthRadius || !markerSurfacePoint.length()) return;
+  if (!globeReady || !pickedCoordinates) return;
   const requestId = ++terrainRequestId;
   fineLandCoverStatus = 'Coarse WorldCover mosaic';
   globalFuelbedStatus = 'Global FCCS fuelbed fallback';
@@ -1738,7 +1301,6 @@ async function startFireSimulation(coordinates) {
   }).isWater;
   if (clickedWater) {
     resetFireSimulation();
-    if (markerGroup) markerGroup.visible = false;
     panelStatus.dataset.mode = 'blocked';
     statusText.textContent = 'Water surface · no ignition';
     simulationReadout.textContent = 'Select a land surface to ignite';
@@ -1749,7 +1311,6 @@ async function startFireSimulation(coordinates) {
   const clickedFuelDecision = crosswalkLandCoverToFuel(clickedLandCover);
   if (!canIgniteFuelDecision(clickedFuelDecision)) {
     resetFireSimulation();
-    if (markerGroup) markerGroup.visible = false;
     panelStatus.dataset.mode = 'blocked';
     statusText.textContent = 'Non-burnable surface · no ignition';
     simulationReadout.textContent = 'Select a burnable land surface';
@@ -1758,10 +1319,9 @@ async function startFireSimulation(coordinates) {
     return;
   }
   fireRunId += 1;
-  createFireOverlay(markerSurfacePoint, earthRadius);
+  createFireDataTexture();
   fireRunning = true;
   firePaused = false;
-  manualAngularVelocity.set(0, 0);
   activeScenarioContext = {
     coordinates: { latitude: coordinates.latitude, longitude: coordinates.longitude },
     location: locationValue.textContent,
@@ -1800,6 +1360,7 @@ async function startFireSimulation(coordinates) {
     gridSize: FIRE_GRID_SIZE
   });
   const fineFieldPromise = fetchFineLandCoverField(grid);
+  const urbanFootprintPromise = fetchUrbanFootprintsField(grid);
   const globalFuelbedFieldPromise = fetchGlobalFuelbedField(grid);
   const fractionalFieldPromise = fetchCopernicusLandCoverField(grid);
   const canopyHeightFieldPromise = fetchCanopyHeightField(grid);
@@ -1837,7 +1398,7 @@ async function startFireSimulation(coordinates) {
       ? `${cacheEntry.sampleSize} × ${cacheEntry.sampleSize} terrain samples`
       : 'cached terrain samples';
     terrainSamplingMetadata = sampleLabel;
-    simulationNote.textContent = `Cached GLO-90 terrain · ${FIRE_FIELD_DIAMETER_KM} km field · ${sampleLabel} · overlay ×${FIRE_DISPLAY_SCALE}`;
+    simulationNote.textContent = `Cached GLO-90 terrain (90 m, upsampled) · ${FIRE_FIELD_DIAMETER_METERS} m field · ${sampleLabel} · overlay ×${FIRE_DISPLAY_SCALE}`;
     setTerrainMetadata('Cached GLO-90', terrainHeights);
   } else {
     try {
@@ -1862,7 +1423,7 @@ async function startFireSimulation(coordinates) {
       });
       terrainSamplingMetadata = `${terrain.sampleSize} × ${terrain.sampleSize} terrain samples / ${terrain.requestCount} requests`;
       while (terrainCache.size > TERRAIN_CACHE_LIMIT) terrainCache.delete(terrainCache.keys().next().value);
-      simulationNote.textContent = `GLO-90 terrain loaded · ${FIRE_FIELD_DIAMETER_KM} km field · ${terrain.sampleSize} × ${terrain.sampleSize} samples / ${terrain.requestCount} requests · overlay ×${FIRE_DISPLAY_SCALE}`;
+      simulationNote.textContent = `GLO-90 terrain loaded (90 m, upsampled) · ${FIRE_FIELD_DIAMETER_METERS} m field · ${terrain.sampleSize} × ${terrain.sampleSize} samples / ${terrain.requestCount} requests · overlay ×${FIRE_DISPLAY_SCALE}`;
       setTerrainMetadata('GLO-90 loaded', terrainHeights);
     } catch (error) {
       if (requestId !== terrainRequestId) return;
@@ -1891,6 +1452,9 @@ async function startFireSimulation(coordinates) {
   const fineField = await fineFieldPromise;
   if (requestId !== terrainRequestId) return;
   if (fineField) updateScenarioMetadata();
+  const urbanFootprints = await urbanFootprintPromise;
+  if (requestId !== terrainRequestId) return;
+  updateScenarioMetadata();
   const globalFuelbedField = await globalFuelbedFieldPromise;
   if (requestId !== terrainRequestId) return;
   updateScenarioMetadata();
@@ -1936,7 +1500,6 @@ async function startFireSimulation(coordinates) {
   }
   if (!canIgniteFuelDecision(activeFuelDecision)) {
     resetFireSimulation();
-    if (markerGroup) markerGroup.visible = false;
     panelStatus.dataset.mode = 'blocked';
     statusText.textContent = 'Regional fuel class · no ignition';
     simulationReadout.textContent = 'Select a burnable land surface';
@@ -1950,7 +1513,11 @@ async function startFireSimulation(coordinates) {
     return nearestWorldCoverFineSample(fineField.sampleClassifications, {
       gridSize: grid.gridSize,
       cellRow: cell.row,
-      cellCol: cell.col
+      cellCol: cell.col,
+      // fineField was sampled with one centre sample/cell at block scale
+      // (see fetchFineLandCoverField); match that layout here or this
+      // throws on the length check inside nearestWorldCoverFineSample.
+      sampleOffsets: BLOCK_SCALE_SAMPLE_OFFSETS
     });
   };
   const globalFuelbedAtLatLon = (latitude, longitude) => {
@@ -2006,13 +1573,13 @@ async function startFireSimulation(coordinates) {
         },
         fieldSampleAtLatLon(grid, fractionalField, latitude, longitude)
       ),
-    classifyAtCell: fineField
+    classifyAtCell: (fineField || urbanFootprints?.raster)
         ? (row, col) => {
           const index = row * FIRE_GRID_SIZE + col;
-          const fineClassification = fineField.classifications[index];
+          const fineClassification = fineField?.classifications[index];
           const { latitude, longitude } = grid.cellCenterLatLon(row, col);
           const fallbackClassification = landCoverSource.classifyAtLatLon(latitude, longitude);
-          return attachFractionalCover(
+          const classified = attachFractionalCover(
             {
               ...(fineClassification ?? fallbackClassification),
               globalFuelbed: globalFuelbedField?.[index] ?? null,
@@ -2020,6 +1587,30 @@ async function startFireSimulation(coordinates) {
             },
             fractionalField?.samples[index]
           );
+          // Buildings/roads/green go through urbanFootprints.js's raster.
+          // Reuse the SAME classCode-driven crosswalk path WorldCover's
+          // "Built-up" (50) already takes for non-burnable, and the same
+          // vegetation classes for OSM green space — no new fuel-decision
+          // code path (see landCoverToFuel.js).
+          const urbanCell = urbanFootprints?.raster?.cells?.[index];
+          if (urbanCell?.kind === 'building' || urbanCell?.kind === 'road') {
+            return {
+              ...classified,
+              classCode: BUILT_UP_CLASS_CODE,
+              source: 'OSM Overpass',
+              landfireFuelModelCode: null,
+              globalFuelbed: null
+            };
+          }
+          if (urbanCell?.kind === 'green') {
+            return {
+              ...classified,
+              classCode: urbanCell.classCode,
+              source: 'OSM Overpass landuse',
+              landfireFuelModelCode: null
+            };
+          }
+          return classified;
         }
         : null,
       crosswalk: crosswalkLandCoverToFuel,
@@ -2064,6 +1655,12 @@ async function startFireSimulation(coordinates) {
     fireRunning = false;
     return;
   }
+
+  rebuildBlockScene(fuelField, urbanFootprints);
+  // P3 (drape-on-globe) is parked: the Cesium rectangle never rendered inside
+  // the timebox, so the camera cut back to the block scene. Flip
+  // DRAPE_ON_GLOBE to re-enable and pick the work back up.
+  if (!DRAPE_ON_GLOBE) dropCameraIntoBlockScene();
 
   const transferredHeights = terrainHeights?.slice() ?? null;
   const slopeGrade = Math.max(0, params.slopeStrength);
@@ -2137,6 +1734,10 @@ async function startFireSimulation(coordinates) {
       defaultSlopeAspectNorth: usesPresetSlope ? 1 : 0,
       terrainHeights: transferredHeights,
       maxPropagationMinutes: FIRE_MAX_PROPAGATION_HOURS * 60,
+      // Block scale (640 m field) is well inside SPOTTING_MAX_DISTANCE_METERS
+      // (5000 m) — embers would land off-map. Explicit, not just relying on
+      // the solver's default; see the matching assertion in fireWorker.js.
+      enableSpotting: false,
       ensemble: params.useUncertaintyEnsemble
         ? {
           enabled: true,
@@ -2171,7 +1772,7 @@ function resetFireSimulation() {
   fireWorker.postMessage({ type: 'stop' });
   fireRunning = false;
   firePaused = false;
-  manualAngularVelocity.set(0, 0);
+  restoreGlobeCamera();
   lastWeather = null;
   terrainSamplingMetadata = null;
   fineLandCoverStatus = 'Coarse WorldCover mosaic';
@@ -2179,11 +1780,11 @@ function resetFireSimulation() {
   canopyHeightStatus = 'Optional global canopy height';
   globalFuelbedStatus = 'Global FCCS fuelbed fallback';
   landfireFuelStatus = 'LANDFIRE FBFM40 unavailable · fallback';
+  urbanFootprintStatus = 'Not fetched';
   ensembleMetadata = null;
   scenarioEvidence = null;
   weatherMetadataStatus = 'Scenario fallback';
   activeScenarioContext = null;
-  if (fireOverlay) fireOverlay.visible = false;
   pauseButton.disabled = true;
   pauseButton.textContent = 'Pause';
   pauseButton.setAttribute('aria-label', 'Pause simulation');
@@ -2237,11 +1838,34 @@ function formatFuelFieldQuality(summary) {
   return quality + ' · ' + Math.round((covered / total) * 100) + '% covered · ' + low + ' low' + canopy + wind + globalCanopyLabel + globalCanopyBaseHeightLabel + crown + variantLabel + globalLabel + regionalLabel;
 }
 
+// At block scale (10 m cells, 0.4 km² field) most meaningful values are
+// well under 1 km² / 1 km: Math.round(...) + "km²" rounds every readable
+// result to "0". Switch to m² / m below 0.1 of the unit so an actively
+// spreading fire doesn't display as if nothing happened.
+function formatAreaMetric(areaKm2) {
+  const area = Number.isFinite(areaKm2) ? areaKm2 : 0;
+  if (area < 0.1) return `${Math.round(area * 1_000_000).toLocaleString()} m²`;
+  return `${area.toFixed(2)} km²`;
+}
+function formatDistanceMetric(distanceKm) {
+  const distance = Number.isFinite(distanceKm) ? distanceKm : 0;
+  if (distance < 0.1) return `${Math.round(distance * 1000).toLocaleString()} m`;
+  return `${distance.toFixed(2)} km`;
+}
+function formatRateMetric(rateKmh) {
+  const rate = Number.isFinite(rateKmh) ? rateKmh : 0;
+  if (rate < 0.1) return `${Math.round(rate * 1000).toLocaleString()} m/h`;
+  return `${rate.toFixed(1)} km/h`;
+}
+
 fireWorker.onmessage = ({ data }) => {
   if (data.type !== 'frame' || data.runId && data.runId !== fireRunId) return;
-  if (!fireTexture || !fireMaterial) return;
+  if (!fireTexture) return;
   fireTexture.image.data = data.frame;
   fireTexture.needsUpdate = true;
+  if (data.arrivalField && blockSceneInstance) {
+    blockSceneInstance.setArrivalField(data.arrivalField.values);
+  }
   if (data.ensemble) {
     ensembleMetadata = data.ensemble;
     updateScenarioMetadata();
@@ -2249,10 +1873,10 @@ fireWorker.onmessage = ({ data }) => {
     const horizonHours = Number.isFinite(data.ensemble.horizonMinutes)
       ? Math.round(data.ensemble.horizonMinutes / 60)
       : null;
-    const lowArea = Math.round((range.low ?? 0) * FIRE_CELL_SIZE_KM ** 2);
-    const highArea = Math.round((range.high ?? 0) * FIRE_CELL_SIZE_KM ** 2);
+    const lowArea = formatAreaMetric((range.low ?? 0) * FIRE_CELL_SIZE_KM ** 2);
+    const highArea = formatAreaMetric((range.high ?? 0) * FIRE_CELL_SIZE_KM ** 2);
     simulationNote.textContent = horizonHours
-      ? `Experimental sensitivity range · ${lowArea}-${highArea} km² at ${horizonHours} h · uncalibrated`
+      ? `Experimental sensitivity range · ${lowArea}-${highArea} at ${horizonHours} h · uncalibrated`
       : 'Experimental sensitivity range · uncalibrated';
   }
   firePaused = data.paused;
@@ -2260,9 +1884,16 @@ fireWorker.onmessage = ({ data }) => {
   pauseButton.setAttribute('aria-label', firePaused ? 'Resume simulation' : 'Pause simulation');
   if (data.terrainAvailable) {
     const sampleLabel = terrainSamplingMetadata ? ` · ${terrainSamplingMetadata}` : '';
-    simulationNote.textContent = `GLO-90 terrain loaded · ${FIRE_FIELD_DIAMETER_KM} km field${sampleLabel} · overlay ×${FIRE_DISPLAY_SCALE}`;
+    simulationNote.textContent = `GLO-90 terrain loaded (90 m, upsampled) · ${FIRE_FIELD_DIAMETER_METERS} m field${sampleLabel} · overlay ×${FIRE_DISPLAY_SCALE}`;
   }
   const metrics = data.metrics ?? {};
+  liveModelMinutes = metrics.elapsedMinutes ?? 0;
+  if (blockSceneInstance && Number(timelineScrub.dataset.scrubbing) !== 1) {
+    blockSceneInstance.setTime(liveModelMinutes);
+    fireDrape?.setTime(liveModelMinutes);
+    timelineScrub.value = String(Math.min(Number(timelineScrub.max), liveModelMinutes));
+    timelineScrubValue.textContent = formatModelTime(liveModelMinutes);
+  }
   const direction = formatCompassDirection(metrics.dominantSpreadDirectionDeg ?? 0);
   const params = getSimulationParams();
   // A run that burns nothing is usually a correct physical result, not a
@@ -2281,13 +1912,13 @@ fireWorker.onmessage = ({ data }) => {
       zeroReason = ` · no spread — ${code} below cell-crossing rate at ${params.windSpeed ?? 0} km/h (needs to cross ${cellM} m; try more wind or slope)`;
     }
   }
-  simulationReadout.textContent = `${data.stepCount.toString().padStart(3, '0')} ticks · ${formatModelTime(metrics.elapsedMinutes ?? 0)} · ${Math.round(burned).toLocaleString()} km² burned${zeroReason}`;
+  simulationReadout.textContent = `${data.stepCount.toString().padStart(3, '0')} ticks · ${formatModelTime(metrics.elapsedMinutes ?? 0)} · ${formatAreaMetric(burned)} burned${zeroReason}`;
   modelTimeValue.textContent = formatModelTime(metrics.elapsedMinutes ?? 0);
-  burnedAreaValue.textContent = `${Math.round(metrics.burnedAreaKm2 ?? 0).toLocaleString()} km²`;
-  footprintValue.textContent = `${Math.round(metrics.footprintAreaKm2 ?? 0).toLocaleString()} km²`;
-  perimeterValue.textContent = `${Math.round(metrics.perimeterKm ?? 0).toLocaleString()} km`;
-  maxSpreadValue.textContent = `${(metrics.maxSpreadDistanceKm ?? 0).toFixed(1)} km`;
-  spreadRateValue.textContent = `${(metrics.averageSpreadRateKmh ?? 0).toFixed(1)} km/h`;
+  burnedAreaValue.textContent = formatAreaMetric(metrics.burnedAreaKm2 ?? 0);
+  footprintValue.textContent = formatAreaMetric(metrics.footprintAreaKm2 ?? 0);
+  perimeterValue.textContent = formatDistanceMetric(metrics.perimeterKm ?? 0);
+  maxSpreadValue.textContent = formatDistanceMetric(metrics.maxSpreadDistanceKm ?? 0);
+  spreadRateValue.textContent = formatRateMetric(metrics.averageSpreadRateKmh ?? 0);
   directionValue.textContent = `Spread direction · ${direction} · ${Math.round(metrics.dominantSpreadDirectionDeg ?? 0)}°`;
   interpretationText.textContent = buildSpreadExplanation({
     direction,
@@ -2301,7 +1932,6 @@ fireWorker.onmessage = ({ data }) => {
   } else if (fireRunning && isSimulationSettled(data)) {
     fireRunning = false;
     firePaused = false;
-    manualAngularVelocity.set(0, 0);
     pauseButton.disabled = true;
     panelStatus.dataset.mode = 'armed';
     const terminationReason = metrics.terminationReason;
@@ -2325,145 +1955,15 @@ fireWorker.onmessage = ({ data }) => {
 // ─────────────────────────────────────────────────────────────
 // Camera framing
 // ─────────────────────────────────────────────────────────────
-function frameModel(model) {
-  const box = new THREE.Box3().setFromObject(model);
-  const center = box.getCenter(new THREE.Vector3());
-  const size = box.getSize(new THREE.Vector3()).length();
-
-  model.position.sub(center);
-
-  const distance = size / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
-  camera.position.set(0, 0, distance * 1.32);
-  camera.near = distance / 100;
-  camera.far = Math.max(distance * 100, 20000);
-  camera.updateProjectionMatrix();
-  referenceCameraDistance = distance * 1.32;
-
-  controls.target.set(0, 0, 0);
-  controls.update();
-}
-
 // ─────────────────────────────────────────────────────────────
-// Zoom on wheel — dolly along the mouse ray
-// ─────────────────────────────────────────────────────────────
-function handleZoomWheel(event) {
-  if (globeMeshes.length === 0) return;
-
-  const rect = renderer.domElement.getBoundingClientRect();
-  pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-  pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-  raycaster.setFromCamera(pointer, camera);
-
-  const [hit] = raycaster.intersectObjects(globeMeshes, true);
-  if (!hit) return;
-
-  event.preventDefault();
-  event.stopImmediatePropagation();
-
-  const zoomScale = Math.pow(0.82, Math.abs(event.deltaY * 0.01));
-  const directionToHit = hit.point.clone().sub(camera.position).normalize();
-  const currentDistance = camera.position.distanceTo(hit.point);
-  const nextDistance = currentDistance * (event.deltaY < 0 ? zoomScale : 1 / zoomScale);
-  const nextCameraPosition = hit.point.clone().addScaledVector(directionToHit, -nextDistance);
-  const cameraDelta = nextCameraPosition.clone().sub(camera.position);
-
-  camera.position.copy(nextCameraPosition);
-  controls.target.add(cameraDelta);
-  controls.update();
-}
-
-// ─────────────────────────────────────────────────────────────
-// Animation loop
+// Animation loop — renders the local block scene once ignited.
+// The globe/location-picking phase is owned entirely by Cesium.
 // ─────────────────────────────────────────────────────────────
 function animate() {
-  const deltaSeconds = Math.min(earthClock.getDelta(), 0.05);
-  const now = performance.now();
-  const timeSeconds = now * 0.001;
-
-  if (earthModel && shouldAutoRotate({ fireRunning }) && !isDraggingEarth && !pointerDown &&
-      (!pointerOverCanvas || resumeRotationWhileHovered)) {
-    earthSpinGroup.rotation.y += (AUTO_ROTATION_SPEED + manualAngularVelocity.y) * deltaSeconds;
-    earthSpinGroup.rotation.x = THREE.MathUtils.clamp(
-      earthSpinGroup.rotation.x + manualAngularVelocity.x * deltaSeconds,
-      -Math.PI * 0.42,
-      Math.PI * 0.42
-    );
-    const damping = Math.pow(0.035, deltaSeconds);
-    manualAngularVelocity.multiplyScalar(damping);
-  }
-
-  // Very slow starfield parallax (gives the void a sense of depth)
-  starfield.rotation.y += 0.005 * deltaSeconds;
-  starfield.material.uniforms.uTime.value = timeSeconds;
-
-  if (atmosphereMesh) {
-    atmosphereMesh.material.uniforms.uTime.value = timeSeconds;
-  }
-
-  updatePings(now);
+  earthClock.getDelta();
   controls.update();
-  updateMarker();
-  if (fireOverlay && fireMaterial) {
-    fireMaterial.uniforms.uTime.value = timeSeconds;
-    const fireWorldPosition = fireOverlay.getWorldPosition(new THREE.Vector3());
-    const fireOutward = markerSurfacePoint.clone()
-      .normalize()
-      .transformDirection(earthSpinGroup.matrixWorld);
-    const fireTowardCamera = camera.position.clone().sub(fireWorldPosition).normalize();
-    fireOverlay.visible = fireOutward.dot(fireTowardCamera) > -0.08;
-  }
   composer.render();
   requestAnimationFrame(animate);
-}
-
-// ─────────────────────────────────────────────────────────────
-// Pointer / touch interaction (drag-spin the earth)
-// ─────────────────────────────────────────────────────────────
-function handlePointerDown(event) {
-  if (event.button !== 0 || !earthModel) return;
-  pointerDown = { x: event.clientX, y: event.clientY, timeStamp: event.timeStamp };
-  isDraggingEarth = false;
-  manualAngularVelocity.set(0, 0);
-  canvas.setPointerCapture?.(event.pointerId);
-}
-
-function handlePointerMove(event) {
-  if (!pointerDown || !earthModel) return;
-  const deltaX = event.clientX - pointerDown.x;
-  const deltaY = event.clientY - pointerDown.y;
-  if (!isDraggingEarth && Math.hypot(deltaX, deltaY) < 3) return;
-
-  isDraggingEarth = true;
-  const rotationDeltaY = deltaX * 0.006;
-  const rotationDeltaX = deltaY * 0.006;
-  const elapsedSeconds = Math.max((event.timeStamp - pointerDown.timeStamp) / 1000, 1 / 120);
-  earthSpinGroup.rotation.y += rotationDeltaY;
-  earthSpinGroup.rotation.x = THREE.MathUtils.clamp(
-    earthSpinGroup.rotation.x + rotationDeltaX,
-    -Math.PI * 0.42,
-    Math.PI * 0.42
-  );
-  manualAngularVelocity.y = THREE.MathUtils.clamp(rotationDeltaY / elapsedSeconds, -6, 6);
-  manualAngularVelocity.x = THREE.MathUtils.clamp(rotationDeltaX / elapsedSeconds, -6, 6);
-  pointerDown.x = event.clientX;
-  pointerDown.y = event.clientY;
-  pointerDown.timeStamp = event.timeStamp;
-}
-
-function handlePointerUp(event) {
-  if (!pointerDown) return;
-  if (isDraggingEarth) suppressNextClick = true;
-  canvas.releasePointerCapture?.(event.pointerId);
-  pointerDown = null;
-  isDraggingEarth = false;
-}
-
-function handleCanvasClick(event) {
-  if (suppressNextClick) {
-    suppressNextClick = false;
-    return;
-  }
-  handleGlobeClick(event);
 }
 
 function resize() {
@@ -2504,6 +2004,16 @@ weatherMoistureToggle?.addEventListener('change', handleSimulationControlChange)
 uncertaintyToggle?.addEventListener('change', handleSimulationControlChange);
 liveMoistureInput.addEventListener('input', handleSimulationControlChange);
 slopeInput.addEventListener('input', handleSimulationControlChange);
+timelineScrub.addEventListener('input', () => {
+  timelineScrub.dataset.scrubbing = '1';
+  const minutes = Number(timelineScrub.value);
+  blockSceneInstance?.setTime(minutes);
+  fireDrape?.setTime(minutes);
+  timelineScrubValue.textContent = formatModelTime(minutes);
+});
+timelineScrub.addEventListener('change', () => {
+  delete timelineScrub.dataset.scrubbing;
+});
 pauseButton.addEventListener('click', () => fireWorker.postMessage({ type: 'pause' }));
 resetButton.addEventListener('click', resetFireSimulation);
 runHistoryList?.addEventListener('click', handleHistoryClick);
@@ -2516,27 +2026,4 @@ clearHistoryButton?.addEventListener('click', () => {
   scenarioRecords = [];
   renderScenarioHistory();
 });
-canvas.addEventListener('wheel', handleZoomWheel, { capture: true, passive: false });
-canvas.addEventListener('pointerdown', handlePointerDown);
-canvas.addEventListener('pointermove', handlePointerMove);
-canvas.addEventListener('pointerup', handlePointerUp);
-canvas.addEventListener('pointercancel', handlePointerUp);
-canvas.addEventListener('pointerenter', () => {
-  pointerOverCanvas = true;
-  resumeRotationWhileHovered = false;
-});
-canvas.addEventListener('pointerleave', () => { pointerOverCanvas = false; });
-// The floating panels sit visually on top of the canvas but are separate DOM
-// elements, so hovering them never fires the canvas's own pointerenter/leave
-// and the globe kept spinning under the cursor. Reuse the exact same pause
-// mechanism the canvas already uses so the behavior stays one code path.
-for (const panel of hoverPausePanels) {
-  panel?.addEventListener('pointerenter', () => {
-    pointerOverCanvas = true;
-    resumeRotationWhileHovered = false;
-  });
-  panel?.addEventListener('pointerleave', () => { pointerOverCanvas = false; });
-}
-canvas.addEventListener('click', handleCanvasClick);
-
 animate();

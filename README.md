@@ -160,6 +160,56 @@ was overstated.
 5. **The benchmark is 6 US fires**, so global improvements are currently
    unfalsifiable.
 
+## Block scale (interactive path only)
+
+The interactive product path renders a **640 m field at 10 m/cell** (grid
+stays 64x64) with individual buildings/roads, not the 32 km/500 m regional
+field the benchmark above is scored against. **No accuracy claim at this
+scale** — see *Known limitations*. This is a scope change, not a mode: the
+regional benchmark path (`hackathonBenchmarkRunner.js`, `validate-*.mjs`,
+`officialBenchmarkFixtures.js`) uses its own grid config and is untouched.
+
+### Frontend ↔ worker contract (`src/workers/fireWorker.js`)
+
+A new frontend talking to this worker must match:
+
+- **`{ type: 'start', config }`** — `config.size` (grid, currently 64),
+  `config.cellSizeKm` (currently 0.01), `config.enableSpotting` — **must be
+  sent explicitly as `false`**; the worker asserts this and a 640 m field is
+  narrower than `SPOTTING_MAX_DISTANCE_METERS` (5000 m, `firePropagation.js`),
+  so a truthy value is a bug, not a feature. `config.maxPropagationMinutes`
+  defaults to 120 for block scale (was 4320 / 72 h for regional).
+- **`{ type: 'frame', ... }`** replies now include `arrivalField: { size,
+  cellSizeMeters, values } | null` — the full Dijkstra-solved arrival-time
+  grid (minutes, `Infinity`-equivalent sentinel for unreached cells), sent
+  **once per run**, structured-cloned (not transferred — the worker keeps
+  using its own copy). A frontend that wants block-scale fire visuals
+  without re-solving (e.g. a timeline scrubber) should cache this on receipt
+  and drive a shader/uniform from it directly; see
+  `src/renderers/blockScene.js` for the reference shader
+  (`front`/`burned` from `arrival` vs. a scrubbable `uTime`).
+
+### Urban footprints (`src/lib/urbanFootprints.js`)
+
+`fetchUrbanFootprintsForBbox(bbox, { originLatitude, originLongitude,
+gridSize, cellSizeMeters })` returns `{ available, buildings, roads, green,
+raster }`. `raster.cells[row*gridSize+col]` is `null | { kind: 'building' |
+'road' | 'green', heightMeters | widthMeters | classCode, source }`.
+Buildings/roads map to WorldCover classCode 50 (Built-up, non-burnable) —
+the *same* crosswalk barrier `landCoverToFuel.js` already uses, not a new
+fuel-decision path. Overpass is probed once per session and cached by bbox
+(rate-limits hard); a frontend that skips the probe and hammers
+`OVERPASS_INTERPRETER_URL` directly will get throttled. `available: false`
+(no network, no OSM coverage, endpoint down) must render — fall back to the
+WorldCover-only fuel field, don't block ignition on it.
+
+### Coordinate convention
+
+Both `urbanFootprints.js` and `blockScene.js` use local tangent-plane
+meters matching `spatialGrid.js`: `x = east`, `z = -north`. A frontend
+placing its own geometry into the block scene must use this convention or
+buildings/roads will be spatially offset from the fuel/fire raster.
+
 ## Running it
 
 ```bash

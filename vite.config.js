@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { fromArrayBuffer, fromFile, fromUrl } from 'geotiff';
+import cesium from 'vite-plugin-cesium';
 import {
   WORLD_COVER_FINE_SOURCE,
   WORLD_COVER_FINE_TILE_PIXELS,
@@ -724,7 +725,7 @@ function worldCoverFinePlugin() {
 }
 
 export default defineConfig({
-  plugins: [worldCoverFinePlugin()],
+  plugins: [worldCoverFinePlugin(), cesium()],
   server: {
     host: '127.0.0.1'
   }

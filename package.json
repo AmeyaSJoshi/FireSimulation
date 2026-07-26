@@ -34,8 +34,10 @@
     "build:landcover": "node scripts/build-landcover-map.mjs"
   },
   "dependencies": {
+    "cesium": "^1.143.0",
     "three": "^0.167.1",
-    "vite": "^5.4.19"
+    "vite": "^5.4.19",
+    "vite-plugin-cesium": "^1.2.23"
   },
   "devDependencies": {
     "geotiff": "^3.0.5",

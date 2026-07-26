@@ -23,7 +23,7 @@
         </div>
         <div class="guide-block guide-reference">
           <span class="north-marker" aria-label="North">N</span>
-          <span id="guide-scale">32 km field</span>
+          <span id="guide-scale">640 m field</span>
         </div>
       </div>
 
@@ -176,6 +176,15 @@
           <button id="pause-button" type="button" disabled aria-label="Pause simulation">Pause</button>
           <button id="reset-button" type="button" disabled aria-label="Reset simulation">Reset</button>
         </div>
+        <div class="control-row range-row">
+          <label for="timeline-scrub">
+            <span class="control-row-label-top">
+              <span>Timeline (scrub, no re-solve)</span>
+            </span>
+            <output id="timeline-scrub-value">0 min</output>
+          </label>
+          <input id="timeline-scrub" type="range" min="0" max="120" step="1" value="0" disabled />
+        </div>
         <div id="simulation-readout" class="simulation-readout">Click the globe to ignite a local scenario</div>
         <div class="simulation-metrics" aria-live="polite">
           <div><span>Model time</span><strong id="model-time-value">—</strong></div>
@@ -208,6 +217,8 @@
                 <div><dt>Live moisture</dt><dd id="live-moisture-basis-value">60%</dd></div>
                 <div><dt>Slope</dt><dd id="slope-basis-value">0%</dd></div>
                 <div><dt>Scale</dt><dd id="scale-value">—</dd></div>
+                <div><dt>Buildings / roads</dt><dd id="urban-basis-value">Not fetched</dd></div>
+                <div><dt>Spotting</dt><dd id="spotting-basis-value">Off · block scale</dd></div>
                 <div><dt>Field quality</dt><dd id="fuel-field-quality-value">Awaiting local field</dd></div>
                 <div><dt>Seed</dt><dd id="seed-value">17</dd></div>
                 <div><dt>Range</dt><dd id="uncertainty-basis-value">Deterministic</dd></div>
@@ -222,7 +233,8 @@
           <span id="direction-value">Spread direction · —</span>
         </div>
         <div class="model-disclaimer">
-          Rothermel surface model · not a forecast
+          Rothermel surface model · not a forecast · block-scale render for
+          legibility, no accuracy claim at this scale
         </div>
         <section class="run-history" aria-label="Recent simulation runs">
           <div class="metadata-heading">
@@ -233,7 +245,7 @@
             <p class="history-empty">Complete a run to save it here.</p>
           </div>
         </section>
-        <p class="terrain-attribution">Terrain: Copernicus GLO-90 via Open-Meteo · global, coarse-scale elevation</p>
+        <p class="terrain-attribution">Terrain: Copernicus GLO-90 (90 m) via Open-Meteo, upsampled to 10 m cells · wind: ERA5/Open-Meteo, one vector for the whole 640 m field · buildings &amp; roads: OpenStreetMap via Overpass</p>
         <p class="simulation-note">Rothermel surface model · 1 min/tick · terrain loads on ignition</p>
       </section>
     </div>

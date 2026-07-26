@@ -1,5 +1,45 @@
 # Fire Simulation — working notes for Claude Code
 
+## Simulation contract — do not change without telling both devs
+
+`src/sim/runFromClick.js` exports `runFromClick({ lat, lon })`, resolving to:
+
+```js
+{
+  arrivalMinutes: Float32Array(4096),  // row-major gridSize x gridSize, minutes since ignition (non-finite = never burns)
+  fuelCodes: Uint8Array(4096),         // index into provenance.fuelCodeList (= listFuelModelCodes())
+  buildings: [{ ring, height }],       // ring: [{x,z}...] local meters from click origin; height: meters
+  roads: [{ polygon }],                // polygon: [{x,z}...] quad, local meters (one entry per road segment)
+  cellSizeMeters: 10,
+  gridSize: 64,
+  bbox: [west, south, east, north],    // degrees
+  provenance: { worldCover, osm, fuelCrosswalk, fuelCodeList, weather, terrain }
+}
+```
+
+640 m field (64 x 10 m cells), real ESA WorldCover + OSM Overpass data, `src/lib/`
+untouched. Weather/terrain/canopy/LANDFIRE are flat defaults for now (calm,
+no wind, no DEM) — see `provenance.weather`/`provenance.terrain`.
+
+### Rendering (P3) — draped on the globe
+
+`src/globe/fireDrape.js` consumes the contract above and paints it onto Cesium:
+a rectangle over `bbox`, textured from a `gridSize`-square canvas that re-encodes
+arrival times against the timeline clock (`burned = arrival <= t`,
+`front = arrival within 90 s of t`). Driven by the existing scrub + worker clock
+in `main.js`. No camera cut — fire appears on the terrain already in view.
+
+Two Cesium gotchas cost real time here; do not "simplify" them back:
+- The image material is re-created (`new ImageMaterialProperty`) on every paint
+  with a **fresh canvas**. Redrawing one canvas, or feeding it via
+  `CallbackProperty`, renders as blank white — Cesium caches by reference.
+- The rectangle sits at `height: 2`, not 0, on the ellipsoid fallback. At 0 it
+  z-fights the globe surface and vanishes. With real (Ion) terrain it uses
+  `classificationType: TERRAIN` instead.
+
+`DRAPE_ON_GLOBE` in `main.js` toggles this off and restores the old cut-to-block-scene
+path; the block scene is still built either way and still owns metrics/timeline.
+
 ## Context bombs — never Read/cat these whole (measured sizes)
 
 | File | Size | Hazard |
