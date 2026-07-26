@@ -43,7 +43,7 @@ export const AERIAL_PITCH_RADIANS = Cesium.Math.toRadians(-55);
 // move on top of an already-correct pick.
 const FAR_ALTITUDE_METERS = 2000;
 
-export function flyToAerial(viewer, { latitude, longitude, rangeMeters = 900, duration = 1.5 }) {
+export function flyToAerial(viewer, { latitude, longitude, groundHeightMeters = 0, rangeMeters = 900, duration = 1.5 }) {
   if (viewer.camera.positionCartographic.height <= FAR_ALTITUDE_METERS) return;
   // Cesium cancels an in-progress camera flight when it sees user input, and
   // callers start this from inside the click handler — the trailing mouse-up
@@ -52,17 +52,21 @@ export function flyToAerial(viewer, { latitude, longitude, rangeMeters = 900, du
   //
   // setTimeout, not requestAnimationFrame: rAF is throttled to zero in
   // background/headless contexts, which silently dropped the flight entirely.
-  setTimeout(() => flyNow(viewer, { latitude, longitude, rangeMeters, duration }), 0);
+  setTimeout(() => flyNow(viewer, { latitude, longitude, groundHeightMeters, rangeMeters, duration }), 0);
 }
 
 // flyToBoundingSphere never tweened here (it silently no-ops unless duration
 // is 0), so the destination is computed explicitly and handed to camera.flyTo.
-function flyNow(viewer, { latitude, longitude, rangeMeters, duration }) {
+//
+// height/destination MUST be terrain-relative: an absolute ellipsoid altitude
+// put the camera underground (or absurdly far above) on any hill/building,
+// since Google 3D Tiles terrain sits well off the WGS84 ellipsoid.
+function flyNow(viewer, { latitude, longitude, groundHeightMeters, rangeMeters, duration }) {
   const pitch = AERIAL_PITCH_RADIANS;
   const heading = Cesium.Math.toRadians(30);
   // Pull the camera back along the view ray so the target sits centre-frame
   // at the requested tilt.
-  const height = Math.max(120, rangeMeters * Math.sin(-pitch));
+  const height = groundHeightMeters + Math.max(120, rangeMeters * Math.sin(-pitch));
   const ground = rangeMeters * Math.cos(-pitch);
   const metresPerDegreeLat = 111320;
   const metresPerDegreeLon = metresPerDegreeLat * Math.max(Math.cos(Cesium.Math.toRadians(latitude)), 1e-6);

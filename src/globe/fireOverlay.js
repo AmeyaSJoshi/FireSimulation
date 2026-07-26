@@ -60,14 +60,10 @@ function buildArrivalTexture({ gridSize, arrivalMinutes, fuelCodes }) {
 // Row 0 of the sim grid is north (spatialGrid convention), but a Cesium
 // Rectangle's v axis runs south->north, so the shader flips v when sampling.
 const FIRE_MATERIAL_SHADER = /* glsl */`
-uniform sampler2D arrivalMap_0;
-uniform float uTime_1;
-uniform float uFrontWindow_2;
-
 czm_material czm_getMaterial(czm_materialInput materialInput) {
   czm_material material = czm_getDefaultMaterial(materialInput);
   vec2 uv = vec2(materialInput.st.x, 1.0 - materialInput.st.y);
-  vec4 texel = texture(arrivalMap_0, uv);
+  vec4 texel = texture(arrivalMap, uv);
 
   // Cells that never ignite stay fully transparent.
   if (texel.a < 0.5) {
@@ -79,14 +75,14 @@ czm_material czm_getMaterial(czm_materialInput materialInput) {
   float intensity = texel.b;
 
   // Not yet reached by the front.
-  if (arrival > uTime_1) {
+  if (arrival > uTime) {
     material.alpha = 0.0;
     return material;
   }
 
-  float age = uTime_1 - arrival;
+  float age = uTime - arrival;
   // 1.0 exactly at the front, falling to 0.0 by the end of the window.
-  float front = 1.0 - clamp(age / uFrontWindow_2, 0.0, 1.0);
+  float front = 1.0 - clamp(age / uFrontWindow, 0.0, 1.0);
   // Sharpen so the leading edge reads as a band, not a broad gradient, and
   // give it an emissive falloff so it looks like fire rather than a polygon.
   float glow = pow(front, 2.2);

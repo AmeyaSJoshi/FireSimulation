@@ -103,23 +103,18 @@ export function initCesiumGlobe() {
 
     const carto = Cesium.Cartographic.fromCartesian(cartesian);
 
-    // Sanity-check the pick against the actual rendered surface height at
-    // that lon/lat. A stale/edge depth-buffer sample can return a cartesian
-    // whose height doesn't match what's actually there; catch it rather than
-    // ignite on a coordinate that's confidently wrong.
+    // Diagnostic only — building sides/slopes legitimately disagree with a
+    // single sampleHeight() call at the same lon/lat, so this used to refuse
+    // real clicks. Log and proceed; never blocks the pick.
     if (typeof viewer.scene.sampleHeight === 'function') {
-      let sampledHeight = null;
       try {
-        sampledHeight = viewer.scene.sampleHeight(carto);
+        const sampledHeight = viewer.scene.sampleHeight(carto);
+        if (Number.isFinite(sampledHeight) && Math.abs(sampledHeight - carto.height) > 50) {
+          console.info('[cesiumGlobe] picked height', carto.height.toFixed(1),
+            'm vs sampled', sampledHeight.toFixed(1), 'm (diagnostic only, not blocking) · strategy:', strategy);
+        }
       } catch {
-        sampledHeight = null; // no pickable surface at this pixel; skip the check
-      }
-      if (Number.isFinite(sampledHeight) && Math.abs(sampledHeight - carto.height) > 50) {
-        console.warn('[cesiumGlobe] click refused — picked height', carto.height.toFixed(1),
-          'm disagrees with sampled surface height', sampledHeight.toFixed(1),
-          'm by more than 50 m · strategy:', strategy, '·', TILES_LOADING_MESSAGE);
-        pickRefusedCallback?.(TILES_LOADING_MESSAGE);
-        return;
+        // no pickable surface at this pixel for sampleHeight; nothing to log
       }
     }
 
@@ -127,6 +122,7 @@ export function initCesiumGlobe() {
     clickCallback?.({
       lat: Cesium.Math.toDegrees(carto.latitude),
       lon: Cesium.Math.toDegrees(carto.longitude),
+      groundHeightMeters: carto.height,
       cameraAltitudeMeters: viewer.camera.positionCartographic.height
     });
   }, Cesium.ScreenSpaceEventType.LEFT_CLICK);

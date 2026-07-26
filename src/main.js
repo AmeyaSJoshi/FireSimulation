@@ -875,7 +875,7 @@ try {
   fireDrape = createFireLOD(cesiumGlobe.viewer);
   globeReady = true;
   if (import.meta.env.DEV) window.__ignis = { viewer: cesiumGlobe.viewer, fireDrape, globe: cesiumGlobe, globeLOD };
-  cesiumGlobe.onGlobeClick(({ lat, lon }) => handleGlobeClick(lat, lon));
+  cesiumGlobe.onGlobeClick(({ lat, lon, groundHeightMeters }) => handleGlobeClick(lat, lon, groundHeightMeters));
   cesiumGlobe.onPickRefused((message) => {
     resetFireSimulation();
     panelStatus.dataset.mode = 'blocked';
@@ -894,7 +894,7 @@ if (loadingEl) {
 // ─────────────────────────────────────────────────────────────
 // Selection
 // ─────────────────────────────────────────────────────────────
-function handleGlobeClick(lat, lon) {
+function handleGlobeClick(lat, lon, groundHeightMeters = 0) {
   if (!globeReady) return;
   const coordinates = { latitude: lat, longitude: lon };
   const isOcean = terrainSampler ? terrainSampler.isWaterAtLatLon(lat, lon) : null;
@@ -952,7 +952,7 @@ function handleGlobeClick(lat, lon) {
   // Tilted aerial framing, fired immediately on click. This must NOT wait on
   // runFromClick — that blocks on an Overpass round trip, so the camera would
   // sit top-down for seconds and never move at all if the fetch rejects.
-  if (DRAPE_ON_GLOBE) cesiumGlobe?.flyToAerial({ latitude: lat, longitude: lon });
+  if (DRAPE_ON_GLOBE) cesiumGlobe?.flyToAerial({ latitude: lat, longitude: lon, groundHeightMeters });
   startFireSimulation(coordinates);
 
   // P3: real WorldCover + OSM ignition, draped onto the globe in place. The
