@@ -37,7 +37,14 @@ export async function addGooglePhotorealisticTiles(viewer) {
 // Tilted aerial framing (reference look), not top-down.
 export const AERIAL_PITCH_RADIANS = Cesium.Math.toRadians(-55);
 
+// Altitude above which the camera is considered "far" and gets pulled down
+// toward the click. Below it, the user already picked what they were looking
+// at — recentering/reframing on top of that is a second, unrequested camera
+// move on top of an already-correct pick.
+const FAR_ALTITUDE_METERS = 2000;
+
 export function flyToAerial(viewer, { latitude, longitude, rangeMeters = 900, duration = 1.5 }) {
+  if (viewer.camera.positionCartographic.height <= FAR_ALTITUDE_METERS) return;
   // Cesium cancels an in-progress camera flight when it sees user input, and
   // callers start this from inside the click handler — the trailing mouse-up
   // of that same click killed the flight and left the camera top-down. Defer

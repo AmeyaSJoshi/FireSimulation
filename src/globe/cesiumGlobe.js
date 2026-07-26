@@ -39,9 +39,23 @@ export function initCesiumGlobe() {
   // Google Photorealistic 3D Tiles are served through ion, so they only load
   // with a token. Without one this rejects and P1's imagery/terrain globe
   // stays as-is (short-circuited, not deleted).
+  let tileset = null;
   let tilesetPromise = null;
-  if (hasPhotorealisticTilesKey()) {
+  // pickPosition (depth-buffer read) is the ONLY strategy that can hit tile
+  // geometry — the tileset hides the globe, so globe.pick/pickEllipsoid miss
+  // it entirely. Without it there is no reliable way to pick a tile surface
+  // at all, so the tileset is never enabled in that case: better a plain,
+  // correctly-pickable globe than photoreal tiles nothing can click.
+  const pickPositionSupported = viewer.scene.pickPositionSupported;
+  if (!pickPositionSupported) {
+    console.warn('[cesiumGlobe] scene.pickPositionSupported is false — Google 3D Tiles cannot be reliably picked on this device/browser. Staying on the terrain+imagery globe.');
+  }
+  if (pickPositionSupported && hasPhotorealisticTilesKey()) {
     tilesetPromise = addGooglePhotorealisticTiles(viewer)
+      .then((result) => {
+        tileset = result;
+        return result;
+      })
       .catch((error) => {
         console.warn('[cesiumGlobe] Google 3D Tiles unavailable, keeping imagery globe:', error?.message ?? error);
         return null;
@@ -55,19 +69,58 @@ export function initCesiumGlobe() {
 
   let clickCallback = null;
   viewer.screenSpaceEventHandler.setInputAction((movement) => {
-    // Three pick strategies, most specific first:
-    //  1. scene.pickPosition reads the depth buffer, so it is the only one
-    //     that hits Google 3D Tiles geometry. With photoreal tiles on, the
-    //     globe is hidden and the other two would miss entirely.
-    //  2. globe.pick for the plain terrain globe — but it only hits *loaded*
-    //     terrain, so it misses while tiles are still streaming.
-    //  3. the smooth ellipsoid, which is always pickable.
-    const ray = viewer.camera.getPickRay(movement.position);
-    const cartesian = viewer.scene.pickPosition(movement.position)
-      ?? (ray && viewer.scene.globe.pick(ray, viewer.scene))
-      ?? viewer.camera.pickEllipsoid(movement.position, viewer.scene.globe.ellipsoid);
-    if (!cartesian) return;
+    const tilesActive = Boolean(tileset?.show);
+    let cartesian = null;
+    let strategy = null;
+
+    if (tilesActive) {
+      // Tiles hide the globe, so this is the ONLY valid strategy while they
+      // are the active surface. No ellipsoid fallback here, ever — that was
+      // the bug: pickEllipsoid always "succeeds," returning a WGS84 ellipsoid
+      // point at height 0, which is kilometers off at any oblique angle and
+      // silently ignites the wrong place.
+      cartesian = viewer.scene.pickPosition(movement.position) ?? null;
+      strategy = cartesian ? 'tile-depth' : null;
+    } else {
+      const ray = viewer.camera.getPickRay(movement.position);
+      cartesian = (ray && viewer.scene.globe.pick(ray, viewer.scene)) ?? null;
+      strategy = cartesian ? 'globe-terrain' : null;
+      if (!cartesian) {
+        cartesian = viewer.camera.pickEllipsoid(movement.position, viewer.scene.globe.ellipsoid) ?? null;
+        strategy = cartesian ? 'ellipsoid' : null;
+      }
+    }
+
+    if (!cartesian) {
+      console.warn('[cesiumGlobe] click refused — no pick result',
+        tilesActive ? '(tiles active, still streaming here)' : '(no globe/ellipsoid hit)',
+        '· Tiles still loading here — wait a moment and click again.');
+      return;
+    }
+
     const carto = Cesium.Cartographic.fromCartesian(cartesian);
+
+    // Sanity-check the pick against the actual rendered surface height at
+    // that lon/lat. A stale/edge depth-buffer sample can return a cartesian
+    // whose height doesn't match what's actually there; catch it rather than
+    // ignite on a coordinate that's confidently wrong.
+    if (typeof viewer.scene.sampleHeight === 'function') {
+      let sampledHeight = null;
+      try {
+        sampledHeight = viewer.scene.sampleHeight(carto);
+      } catch {
+        sampledHeight = null; // no pickable surface at this pixel; skip the check
+      }
+      if (Number.isFinite(sampledHeight) && Math.abs(sampledHeight - carto.height) > 50) {
+        console.warn('[cesiumGlobe] click refused — picked height', carto.height.toFixed(1),
+          'm disagrees with sampled surface height', sampledHeight.toFixed(1),
+          'm by more than 50 m · strategy:', strategy,
+          '· Tiles still loading here — wait a moment and click again.');
+        return;
+      }
+    }
+
+    console.info('[cesiumGlobe] click pick strategy:', strategy);
     clickCallback?.({
       lat: Cesium.Math.toDegrees(carto.latitude),
       lon: Cesium.Math.toDegrees(carto.longitude),
