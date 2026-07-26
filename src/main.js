@@ -901,7 +901,12 @@ function handleGlobeClick(lat, lon, groundHeightMeters = 0) {
 
   updateConditionPanel(coordinates, isOcean);
 
-  if (!canIgniteSurface(isOcean)) {
+  // terrainSampler classifies against landcover-coarse.png, a ~1km mosaic
+  // where an entire coastal strip (piers, waterfront parks) reads as ocean.
+  // On DRAPE_ON_GLOBE, runFromClick's 10m WorldCover field is the real water
+  // test, so this coarse check is advisory only here — it still blocks on
+  // the legacy (!DRAPE_ON_GLOBE) globe, which has no finer check to defer to.
+  if (!DRAPE_ON_GLOBE && !canIgniteSurface(isOcean)) {
     resetFireSimulation();
     panelStatus.dataset.mode = 'blocked';
     statusText.textContent = surfaceIgnitionMessage(isOcean);
@@ -913,6 +918,9 @@ function handleGlobeClick(lat, lon, groundHeightMeters = 0) {
       : 'Surface classification required before ignition';
     setTerrainMetadata(isOcean === true ? 'Ocean · no ignition' : 'Surface unknown');
     return;
+  }
+  if (DRAPE_ON_GLOBE && isOcean === true) {
+    console.info('[handleGlobeClick] coarse check says ocean — proceeding anyway, runFromClick has the real water test');
   }
 
   if (SIMULATION_ENGINE === 'phase1' && !landCoverSource) {
@@ -938,7 +946,15 @@ function handleGlobeClick(lat, lon, groundHeightMeters = 0) {
     landCover ? `${landCover.className} (WC ${landCover.classCode})` : 'no coverage',
     `→ ${fuelDecision.fuelCode} (${fuelDecision.confidence})`);
 
-  if (!canIgniteFuelDecision(fuelDecision)) {
+  // Same coarse-mosaic problem as the ocean check above: landCoverSource is
+  // the ~1km landcover-coarse.png, which misclassifies plenty of real fuel
+  // (this exact lawn included). On DRAPE_ON_GLOBE, startFireSimulation/
+  // runFromClick reclassify from 10m WorldCover independently — so let a
+  // coarse "non-burnable" through here and let those checks have the final
+  // word, same as the ocean gate right above.
+  if (DRAPE_ON_GLOBE && !canIgniteFuelDecision(fuelDecision)) {
+    console.info('[handleGlobeClick] coarse check says non-burnable — proceeding anyway, fine-resolution checks decide');
+  } else if (!canIgniteFuelDecision(fuelDecision)) {
     resetFireSimulation();
     panelStatus.dataset.mode = 'blocked';
     statusText.textContent = 'Non-burnable surface · no ignition';
