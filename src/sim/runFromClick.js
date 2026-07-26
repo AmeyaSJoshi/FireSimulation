@@ -17,7 +17,10 @@ import { listFuelModelCodes } from '../lib/fuelModels.js';
 export const GRID_SIZE = 64;
 export const CELL_SIZE_METERS = 10;
 const FIELD_CENTER = (GRID_SIZE - 1) / 2;
-const MAX_PROPAGATION_MINUTES = 120;
+// Single source of truth for the block-scale run window. main.js used to keep
+// its own FIRE_MAX_PROPAGATION_HOURS, which had drifted to a stale regional
+// value and was printed in status text that did not match the actual solve.
+export const MAX_PROPAGATION_MINUTES = 120;
 const DEFAULT_ROAD_WIDTH_METERS = 6;
 
 const FUEL_CODE_INDEX = new Map(listFuelModelCodes().map((code, i) => [code, i]));
@@ -140,11 +143,16 @@ export async function runFromClick({ lat, lon }) {
     allowExperimental: false
   });
 
-  if (!clickedFuelDecision.burnable || fuelField.summary.burnableCellCount === 0) {
-    throw new Error('runFromClick: no burnable fuel at this location');
-  }
+  const totalCells = GRID_SIZE * GRID_SIZE;
+  const burnableCellCount = fuelField.summary.burnableCellCount;
+  const nonBurnableCellCount = totalCells - burnableCellCount;
 
-  const arrivalValues = await runFireWorkerOnce({
+  // A field with no burnable cell is a legitimate outcome (dense urban, water,
+  // bare rock), not an error. Returning it with metrics lets the UI say what
+  // happened; throwing here used to surface as a bare console warning.
+  const arrivalValues = burnableCellCount === 0
+    ? new Float32Array(totalCells).fill(Infinity)
+    : await runFireWorkerOnce({
     runId: 1,
     engine: 'phase1',
     size: GRID_SIZE,
@@ -171,7 +179,20 @@ export async function runFromClick({ lat, lon }) {
     defaultSlopeAspectNorth: 0,
     maxPropagationMinutes: MAX_PROPAGATION_MINUTES,
     enableSpotting: false
-  });
+    });
+
+  // The diagnostics that actually distinguish outcomes. terminationReason
+  // ('horizon_reached') fires on nearly every run — any single cell whose
+  // travel time lands past the cap is enough — so it says almost nothing about
+  // whether the fire spread. These four do.
+  let burnedCellCount = 0;
+  let maxFiniteArrivalMinutes = 0;
+  for (let i = 0; i < arrivalValues.length; i += 1) {
+    const arrival = arrivalValues[i];
+    if (!Number.isFinite(arrival)) continue;
+    burnedCellCount += 1;
+    if (arrival > maxFiniteArrivalMinutes) maxFiniteArrivalMinutes = arrival;
+  }
 
   const fuelCodes = new Uint8Array(GRID_SIZE * GRID_SIZE);
   for (let i = 0; i < fuelCodes.length; i += 1) {
@@ -197,6 +218,14 @@ export async function runFromClick({ lat, lon }) {
     cellSizeMeters: CELL_SIZE_METERS,
     gridSize: GRID_SIZE,
     bbox,
+    metrics: {
+      burnedCellCount,
+      burnableCellCount,
+      nonBurnableCellCount,
+      maxFiniteArrivalMinutes,
+      maxPropagationMinutes: MAX_PROPAGATION_MINUTES,
+      cellAreaSquareMeters: CELL_SIZE_METERS * CELL_SIZE_METERS
+    },
     provenance: {
       worldCover: { source: 'ESA WorldCover (coarse mosaic)', clickedClassCode: clickedLandCover?.classCode ?? null },
       osm: urbanFootprints?.available ? 'OSM Overpass' : 'unavailable',

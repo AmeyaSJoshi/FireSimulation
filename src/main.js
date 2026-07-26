@@ -48,8 +48,9 @@ import { classifyScenarioEvidence, formatScenarioEvidence } from './lib/scenario
 import { BUILT_UP_CLASS_CODE, fetchUrbanFootprintsForBbox } from './lib/urbanFootprints.js';
 import { buildFuelColorField, createBlockScene } from './renderers/blockScene.js';
 import { initCesiumGlobe } from './globe/cesiumGlobe.js';
-import { runFromClick } from './sim/runFromClick.js';
-import { createFireOverlay } from './globe/fireOverlay.js';
+import { MAX_PROPAGATION_MINUTES, runFromClick } from './sim/runFromClick.js';
+import { createFireLOD } from './globe/fireLOD.js';
+import { initGlobeLOD } from './globe/globeLOD.js';
 import './styles.css';
 
 // ─────────────────────────────────────────────────────────────
@@ -132,7 +133,6 @@ const FIRE_FIELD_DIAMETER_METERS = Math.round(FIRE_FIELD_DIAMETER_KM * 1000);
 const FIRE_DISPLAY_SCALE = 24;
 // Block-scale default window: 120 minutes, not the regional model's 72 h.
 // A 640 m field cannot hold a multi-day run inside its own boundary anyway.
-const FIRE_MAX_PROPAGATION_HOURS = 2;
 const FIRE_GRID_CENTER = (FIRE_GRID_SIZE - 1) / 2;
 const MODEL_TIMESTEP_MINUTES = 1;
 const SIMULATION_SEED = 17;
@@ -211,6 +211,7 @@ scene.add(sunLight);
 let globeReady = false;
 let pickedCoordinates = null;
 let cesiumGlobe = null;
+let globeLOD = null;
 let fireDrape = null;
 // P3: fire is draped on the Cesium globe in place; no camera cut.
 const DRAPE_ON_GLOBE = true;
@@ -251,7 +252,7 @@ function rebuildBlockScene(fuelField, urbanFootprints) {
   scene.add(blockSceneInstance.group);
   blockSceneActive = true;
   timelineScrub.disabled = false;
-  timelineScrub.max = String(FIRE_MAX_PROPAGATION_HOURS * 60);
+  timelineScrub.max = String(MAX_PROPAGATION_MINUTES);
 }
 
 function dropCameraIntoBlockScene() {
@@ -868,9 +869,12 @@ loadLandCoverSource();
 canvas.style.display = 'none';
 try {
   cesiumGlobe = initCesiumGlobe();
-  fireDrape = createFireOverlay(cesiumGlobe.viewer);
+  // P5: altitude-gated photoreal-tiles <-> shaded terrain globe swap.
+  globeLOD = initGlobeLOD(cesiumGlobe.viewer, cesiumGlobe.tilesetPromise);
+  // P6: same flat overlay as before, plus volumetric flames up close.
+  fireDrape = createFireLOD(cesiumGlobe.viewer);
   globeReady = true;
-  if (import.meta.env.DEV) window.__ignis = { viewer: cesiumGlobe.viewer, fireDrape, globe: cesiumGlobe };
+  if (import.meta.env.DEV) window.__ignis = { viewer: cesiumGlobe.viewer, fireDrape, globe: cesiumGlobe, globeLOD };
   cesiumGlobe.onGlobeClick(({ lat, lon }) => handleGlobeClick(lat, lon));
 } catch (error) {
   console.error('[main] Cesium globe failed to initialize — clicks will not work:', error);
@@ -947,14 +951,86 @@ function handleGlobeClick(lat, lon) {
   // P3: real WorldCover + OSM ignition, draped onto the globe in place. The
   // block-scene run above still drives the timeline clock and metrics panels.
   runFromClick({ lat, lon }).then((result) => {
-    const burned = result.arrivalMinutes.reduce((n, v) => n + (Number.isFinite(v) ? 1 : 0), 0);
-    console.info('[runFromClick]', `${burned}/${result.fuelCodes.length} cells burned`,
-      `· ${result.buildings.length} buildings · ${result.roads.length} road segments`, result.provenance);
+    const m = result.metrics;
+    // The four diagnostics that actually explain an ignition outcome.
+    console.info('[runFromClick]', {
+      burnedCellCount: m.burnedCellCount,
+      burnableCellCount: m.burnableCellCount,
+      nonBurnableCellCount: m.nonBurnableCellCount,
+      maxFiniteArrivalMinutes: Number(m.maxFiniteArrivalMinutes.toFixed(2))
+    }, `· ${result.buildings.length} buildings · ${result.roads.length} road segments`, result.provenance);
     if (DRAPE_ON_GLOBE) {
       fireDrape?.show(result);
-      fireDrape?.setTime(liveModelMinutes);
+      startDrapePlayback(result);
     }
   }).catch((error) => console.warn('[runFromClick] failed:', error));
+}
+
+// Drape playback. The solver returns every cell's arrival time up front, so
+// "playing" is just advancing a clock across that field — nothing re-solves.
+//
+// This exists because terminationReason === 'horizon_reached' was being
+// treated as terminal. It is not: firePropagation records a horizon-limited
+// cell for ANY cell whose travel time lands past the cap, which happens on
+// nearly every run, so playback stopped before the fire had visibly moved.
+// Playback now always runs to maxFiniteArrivalMinutes — the last time
+// anything actually ignites — and only then reports an outcome.
+const DRAPE_PLAYBACK_SECONDS = 12;
+let drapePlaybackHandle = null;
+
+function stopDrapePlayback() {
+  if (drapePlaybackHandle !== null) cancelAnimationFrame(drapePlaybackHandle);
+  drapePlaybackHandle = null;
+}
+
+function formatDrapeOutcome({ burnedCellCount, maxFiniteArrivalMinutes, cellAreaSquareMeters }) {
+  if (burnedCellCount === 0) return 'No burnable fuel at this location';
+  if (burnedCellCount < 10) return `Fire contained by roads and structures (${burnedCellCount} cells)`;
+  const hectares = (burnedCellCount * cellAreaSquareMeters) / 10_000;
+  const minutes = Math.round(maxFiniteArrivalMinutes);
+  return `Burned ${hectares.toFixed(hectares < 1 ? 2 : 1)} ha in ${minutes} min`;
+}
+
+function startDrapePlayback(result) {
+  stopDrapePlayback();
+  const metrics = result.metrics;
+  const endMinutes = metrics.maxFiniteArrivalMinutes;
+
+  timelineScrub.disabled = false;
+  timelineScrub.max = String(Math.max(1, Math.ceil(endMinutes)));
+
+  if (metrics.burnedCellCount === 0 || endMinutes <= 0) {
+    fireDrape?.setTime(0);
+    panelStatus.dataset.mode = 'armed';
+    statusText.textContent = formatDrapeOutcome(metrics);
+    simulationNote.textContent = `${metrics.burnableCellCount} burnable · ${metrics.nonBurnableCellCount} non-burnable cells`;
+    return;
+  }
+
+  panelStatus.dataset.mode = 'running';
+  statusText.textContent = 'Simulation running · local scenario';
+  const startedAt = performance.now();
+
+  const step = () => {
+    const elapsed = (performance.now() - startedAt) / 1000;
+    const progress = Math.min(1, elapsed / DRAPE_PLAYBACK_SECONDS);
+    const minutes = progress * endMinutes;
+    liveModelMinutes = minutes;
+    fireDrape?.setTime(minutes);
+    if (Number(timelineScrub.dataset.scrubbing) !== 1) {
+      timelineScrub.value = String(minutes);
+      timelineScrubValue.textContent = formatModelTime(minutes);
+    }
+    if (progress < 1) {
+      drapePlaybackHandle = requestAnimationFrame(step);
+      return;
+    }
+    drapePlaybackHandle = null;
+    panelStatus.dataset.mode = 'armed';
+    statusText.textContent = formatDrapeOutcome(metrics);
+    simulationNote.textContent = `${metrics.burnedCellCount}/${metrics.burnableCellCount} burnable cells reached · ${metrics.nonBurnableCellCount} non-burnable`;
+  };
+  drapePlaybackHandle = requestAnimationFrame(step);
 }
 
 function updateConditionPanel(coordinates, isOcean) {
@@ -1732,7 +1808,7 @@ async function startFireSimulation(coordinates) {
       defaultSlopeAspectEast: 0,
       defaultSlopeAspectNorth: usesPresetSlope ? 1 : 0,
       terrainHeights: transferredHeights,
-      maxPropagationMinutes: FIRE_MAX_PROPAGATION_HOURS * 60,
+      maxPropagationMinutes: MAX_PROPAGATION_MINUTES,
       // Block scale (640 m field) is well inside SPOTTING_MAX_DISTANCE_METERS
       // (5000 m) — embers would land off-map. Explicit, not just relying on
       // the solver's default; see the matching assertion in fireWorker.js.
@@ -1934,9 +2010,12 @@ fireWorker.onmessage = ({ data }) => {
     pauseButton.disabled = true;
     panelStatus.dataset.mode = 'armed';
     const terminationReason = metrics.terminationReason;
+    // 'horizon_reached' is deliberately NOT handled as a terminal outcome: it
+    // fires whenever any single cell's travel time lands past the cap, which
+    // is nearly every run. Outcome status comes from startDrapePlayback, which
+    // reports what actually burned once the arrival-time animation finishes.
     if (terminationReason === 'horizon_reached') {
-      statusText.textContent = 'Scenario horizon reached · click to ignite again';
-      simulationNote.textContent = `Spread capped at ${FIRE_MAX_PROPAGATION_HOURS} h · fuel beyond the horizon is not shown`;
+      // Leave status to the drape playback; do not stop it here.
     } else if (terminationReason === 'field_boundary_reached') {
       statusText.textContent = 'Model field boundary reached · click to ignite again';
       simulationNote.textContent = 'Local field boundary reached · spread beyond the field is not shown';

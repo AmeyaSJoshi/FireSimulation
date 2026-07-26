@@ -31,7 +31,8 @@
     "validate:progression:fine-hindcast": "node scripts/validate-historical-progression.mjs --archive --mapped-fuels --fine-mapped",
     "validate:progression:fine-hindcast:global": "node scripts/validate-historical-progression.mjs --archive --mapped-fuels --fine-mapped --global-fuelbeds",
     "benchmark:fire": "node scripts/benchmark-fire-model.mjs",
-    "build:landcover": "node scripts/build-landcover-map.mjs"
+    "build:landcover": "node scripts/build-landcover-map.mjs",
+    "dev:auto": "vite --host 127.0.0.1 --port ${PORT:-5173} --strictPort"
   },
   "dependencies": {
     "cesium": "^1.143.0",
