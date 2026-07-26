@@ -876,6 +876,13 @@ try {
   globeReady = true;
   if (import.meta.env.DEV) window.__ignis = { viewer: cesiumGlobe.viewer, fireDrape, globe: cesiumGlobe, globeLOD };
   cesiumGlobe.onGlobeClick(({ lat, lon }) => handleGlobeClick(lat, lon));
+  cesiumGlobe.onPickRefused((message) => {
+    resetFireSimulation();
+    panelStatus.dataset.mode = 'blocked';
+    statusText.textContent = message;
+    simulationReadout.textContent = 'No ignition — click did not resolve to a confident surface point';
+    simulationNote.textContent = message;
+  });
 } catch (error) {
   console.error('[main] Cesium globe failed to initialize — clicks will not work:', error);
 }
@@ -989,14 +996,6 @@ function handleGlobeClick(lat, lon) {
 // nearly every run, so playback stopped before the fire had visibly moved.
 // Playback now always runs to maxFiniteArrivalMinutes — the last time
 // anything actually ignites — and only then reports an outcome.
-const DRAPE_PLAYBACK_SECONDS = 12;
-let drapePlaybackHandle = null;
-
-function stopDrapePlayback() {
-  if (drapePlaybackHandle !== null) cancelAnimationFrame(drapePlaybackHandle);
-  drapePlaybackHandle = null;
-}
-
 function formatDrapeOutcome({ burnedCellCount, maxFiniteArrivalMinutes, cellAreaSquareMeters }) {
   if (burnedCellCount === 0) return 'No burnable fuel at this location';
   if (burnedCellCount < 10) return `Fire contained by roads and structures (${burnedCellCount} cells)`;
@@ -1005,8 +1004,11 @@ function formatDrapeOutcome({ burnedCellCount, maxFiniteArrivalMinutes, cellArea
   return `Burned ${hectares.toFixed(hectares < 1 ? 2 : 1)} ha in ${minutes} min`;
 }
 
+// Playback is owned by the overlay's own clock (one uTime uniform advanced on
+// viewer.clock.onTick). main.js used to run a second, competing rAF loop that
+// pushed setTime every frame; that fought the overlay clock and pinned it to
+// paused. This now only mirrors the overlay's time onto the scrub UI.
 function startDrapePlayback(result) {
-  stopDrapePlayback();
   const metrics = result.metrics;
   const endMinutes = metrics.maxFiniteArrivalMinutes;
 
@@ -1023,28 +1025,20 @@ function startDrapePlayback(result) {
 
   panelStatus.dataset.mode = 'running';
   statusText.textContent = 'Simulation running · local scenario';
-  const startedAt = performance.now();
 
-  const step = () => {
-    const elapsed = (performance.now() - startedAt) / 1000;
-    const progress = Math.min(1, elapsed / DRAPE_PLAYBACK_SECONDS);
-    const minutes = progress * endMinutes;
+  fireDrape?.onTime((minutes) => {
     liveModelMinutes = minutes;
-    fireDrape?.setTime(minutes);
     if (Number(timelineScrub.dataset.scrubbing) !== 1) {
       timelineScrub.value = String(minutes);
       timelineScrubValue.textContent = formatModelTime(minutes);
     }
-    if (progress < 1) {
-      drapePlaybackHandle = requestAnimationFrame(step);
-      return;
+    if (minutes >= endMinutes && panelStatus.dataset.mode === 'running') {
+      panelStatus.dataset.mode = 'armed';
+      statusText.textContent = formatDrapeOutcome(metrics);
+      simulationNote.textContent = `${metrics.burnedCellCount}/${metrics.burnableCellCount} burnable cells reached · ${metrics.nonBurnableCellCount} non-burnable`;
     }
-    drapePlaybackHandle = null;
-    panelStatus.dataset.mode = 'armed';
-    statusText.textContent = formatDrapeOutcome(metrics);
-    simulationNote.textContent = `${metrics.burnedCellCount}/${metrics.burnableCellCount} burnable cells reached · ${metrics.nonBurnableCellCount} non-burnable`;
-  };
-  drapePlaybackHandle = requestAnimationFrame(step);
+  });
+  fireDrape?.play();
 }
 
 function updateConditionPanel(coordinates, isOcean) {

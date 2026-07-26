@@ -68,6 +68,8 @@ export function initCesiumGlobe() {
   viewer.scene.globe.depthTestAgainstTerrain = true;
 
   let clickCallback = null;
+  let pickRefusedCallback = null;
+  const TILES_LOADING_MESSAGE = 'Tiles still loading here — wait a moment and click again.';
   viewer.screenSpaceEventHandler.setInputAction((movement) => {
     const tilesActive = Boolean(tileset?.show);
     let cartesian = null;
@@ -94,7 +96,8 @@ export function initCesiumGlobe() {
     if (!cartesian) {
       console.warn('[cesiumGlobe] click refused — no pick result',
         tilesActive ? '(tiles active, still streaming here)' : '(no globe/ellipsoid hit)',
-        '· Tiles still loading here — wait a moment and click again.');
+        '·', TILES_LOADING_MESSAGE);
+      pickRefusedCallback?.(TILES_LOADING_MESSAGE);
       return;
     }
 
@@ -114,8 +117,8 @@ export function initCesiumGlobe() {
       if (Number.isFinite(sampledHeight) && Math.abs(sampledHeight - carto.height) > 50) {
         console.warn('[cesiumGlobe] click refused — picked height', carto.height.toFixed(1),
           'm disagrees with sampled surface height', sampledHeight.toFixed(1),
-          'm by more than 50 m · strategy:', strategy,
-          '· Tiles still loading here — wait a moment and click again.');
+          'm by more than 50 m · strategy:', strategy, '·', TILES_LOADING_MESSAGE);
+        pickRefusedCallback?.(TILES_LOADING_MESSAGE);
         return;
       }
     }
@@ -134,6 +137,9 @@ export function initCesiumGlobe() {
     flyToAerial: (opts) => flyToAerial(viewer, opts),
     onGlobeClick(cb) {
       clickCallback = cb;
+    },
+    onPickRefused(cb) {
+      pickRefusedCallback = cb;
     },
     setVisible(visible) {
       container.style.display = visible ? '' : 'none';

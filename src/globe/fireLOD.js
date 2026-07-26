@@ -208,6 +208,25 @@ export function createFireLOD(viewer) {
       dirty = true;
     },
 
+    // Playback lives in the base overlay (one clock, one uTime uniform).
+    // These pass through so the UI drives a single clock, and the volumetric
+    // layer stays in step with whatever time the overlay is showing.
+    play() {
+      base.play();
+    },
+
+    get durationMinutes() {
+      return base.durationMinutes;
+    },
+
+    onTime(cb) {
+      base.onTime((minutes) => {
+        timeMinutes = minutes;
+        dirty = true;
+        cb?.(minutes);
+      });
+    },
+
     clear() {
       base.clear();
       if (removeListener) removeListener();
