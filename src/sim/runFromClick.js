@@ -3,16 +3,18 @@
 // return the frozen contract documented in CLAUDE.md. Reuses src/lib/ as-is;
 // nothing in src/lib/ is modified.
 //
-// Not yet included (later milestones): live weather, terrain/DEM, LANDFIRE
-// canopy, uncertainty ensemble. Runs flat defaults (calm, no wind, no slope)
-// so this stays a pure WorldCover+OSM ignition test.
+// Wind and fuel moisture come from live Open-Meteo observations via
+// weatherInputs.js, with the UI sliders as an explicit override (a non-zero
+// wind slider wins). Not yet included: terrain/DEM slope+aspect, LANDFIRE
+// canopy structure, uncertainty ensemble — slope is a flat user value.
 
 import { createSpatialGrid } from '../lib/spatialGrid.js';
 import { createLandCoverSource, createCanvasImageReader } from '../lib/landCoverSource.js';
 import { crosswalkLandCoverToFuel } from '../lib/landCoverToFuel.js';
 import { buildFuelModelCodeField } from '../lib/fireFieldInputs.js';
 import { BUILT_UP_CLASS_CODE, bufferLineToQuads, fetchUrbanFootprintsForBbox } from '../lib/urbanFootprints.js';
-import { listFuelModelCodes } from '../lib/fuelModels.js';
+import { getFuelModel, listFuelModelCodes } from '../lib/fuelModels.js';
+import { compassToMathRadians, fetchWeatherInputs, windToMidflame } from '../lib/weatherInputs.js';
 
 export const GRID_SIZE = 64;
 export const CELL_SIZE_METERS = 10;
@@ -95,7 +97,82 @@ function runFireWorkerOnce(config) {
   });
 }
 
-export async function runFromClick({ lat, lon }) {
+// Live weather, with the UI sliders as an explicit override.
+//
+// This path used to hardcode calm (wind 0, slope 0, 8% moisture), which is why
+// an all-burnable grassland field burned exactly one cell: Rothermel's no-wind
+// no-slope rate never crossed a single 10 m cell inside the 120 min window.
+//
+// Mirrors the manualWind pattern main.js already uses for the block scene:
+// a non-zero wind slider wins; otherwise Open-Meteo's observed wind drives the
+// run. Failure to reach Open-Meteo falls back to the slider values rather than
+// aborting the ignition.
+async function resolveWeatherInputs({ lat, lon, overrides, landCover, fuelDecision }) {
+  const fuelModel = fuelDecision.fuelModelDefinition ?? getFuelModel(fuelDecision.fuelCode);
+  const fuelBedDepthMeters = fuelModel.fuelBedDepthMeters;
+  // Tree cover / mangrove read as sheltered; canopy height isn't wired on this
+  // path yet, so this is coarser than the block-scene equivalent.
+  const canopySheltered = [10, 95].includes(landCover?.classCode);
+
+  let weather = null;
+  try {
+    weather = await fetchWeatherInputs({
+      latitude: lat,
+      longitude: lon,
+      canopySheltered,
+      fuelBedDepthMeters,
+      fuelModel,
+      initialDeadMoistureByClass: { '1h': overrides.deadMoisture }
+    });
+  } catch (error) {
+    console.info('[runFromClick] live weather unavailable, using slider values:', error?.message ?? error);
+  }
+
+  const weatherWind = weather?.wind;
+  const manualWind = overrides.windSpeed > 0;
+  const midflameWindKmh = manualWind
+    ? windToMidflame({
+      tenMeterWindKmh: overrides.windSpeed,
+      canopySheltered,
+      fuelBedDepthMeters,
+      fuelModel
+    }).speedKmh
+    : (weatherWind?.midflameSpeedKmh ?? 0);
+  const windDirectionRadians = manualWind
+    ? compassToMathRadians(overrides.windDirection)
+    : (weatherWind?.mathFrameRadians ?? compassToMathRadians(overrides.windDirection));
+
+  return {
+    weather,
+    manualWind,
+    canopySheltered,
+    fuelBedDepthMeters,
+    midflameWindKmh,
+    windDirectionRadians,
+    // Observed moisture only when the user hasn't taken manual control of it.
+    deadMoistureByClass: overrides.useWeatherMoisture ? (weather?.fuelMoisture?.byClass ?? null) : null,
+    liveMoistureByClass: overrides.useWeatherMoisture ? (weather?.liveFuelMoisture?.byClass ?? null) : null,
+    // A time-varying timeline is only meaningful when weather (not a fixed
+    // slider) is driving the wind.
+    weatherTimeline: manualWind
+      ? null
+      : (overrides.useWeatherMoisture
+        ? (weather?.weatherTimeline ?? weather?.windTimeline ?? null)
+        : (weather?.windTimeline ?? null))
+  };
+}
+
+export const DEFAULT_OVERRIDES = Object.freeze({
+  windSpeed: 0,
+  windDirection: 0,
+  deadMoisture: 0.08,
+  liveMoisture: 0.6,
+  slopeStrength: 0,
+  useWeatherMoisture: true
+});
+
+export async function runFromClick({ lat, lon, overrides: overrideInput = null }) {
+  const overrides = { ...DEFAULT_OVERRIDES, ...(overrideInput ?? {}) };
   const landCoverSource = await getLandCoverSource();
   const grid = createSpatialGrid({
     latitude: lat,
@@ -150,6 +227,10 @@ export async function runFromClick({ lat, lon }) {
   // A field with no burnable cell is a legitimate outcome (dense urban, water,
   // bare rock), not an error. Returning it with metrics lets the UI say what
   // happened; throwing here used to surface as a bare console warning.
+  const wx = burnableCellCount === 0
+    ? null
+    : await resolveWeatherInputs({ lat, lon, overrides, landCover: clickedLandCover, fuelDecision: clickedFuelDecision });
+
   const arrivalValues = burnableCellCount === 0
     ? new Float32Array(totalCells).fill(Infinity)
     : await runFireWorkerOnce({
@@ -159,7 +240,15 @@ export async function runFromClick({ lat, lon }) {
     cellSizeKm: CELL_SIZE_METERS / 1000,
     seed: 17,
     scenario: 'calm',
-    params: { windSpeed: 0, windDirection: 0, moisture: 0.08, deadMoisture: 0.08, liveMoisture: 0.6 },
+    params: {
+      windSpeed: overrides.windSpeed,
+      windDirection: overrides.windDirection,
+      moisture: overrides.deadMoisture,
+      deadMoisture: overrides.deadMoisture,
+      liveMoisture: overrides.liveMoisture,
+      useWeatherMoisture: overrides.useWeatherMoisture,
+      slopeStrength: overrides.slopeStrength
+    },
     speed: 24,
     timestepMinutes: 1,
     ignition: { x: FIELD_CENTER, y: FIELD_CENTER },
@@ -169,12 +258,17 @@ export async function runFromClick({ lat, lon }) {
     fuelLoadScaleByCell: fuelField.fuelLoadScaleByCell,
     fuelPersistenceMinutesByCell: fuelField.fuelPersistenceMinutesByCell,
     waterBarrierEdges: fuelField.waterBarrierEdges,
-    moistureFraction: 0.08,
-    deadMoistureFraction: 0.08,
-    liveMoistureFraction: 0.6,
-    midflameWindKmh: 0,
-    windDirectionRadians: 0,
-    defaultSlopeRadians: 0,
+    fuelBedDepthMeters: wx.fuelBedDepthMeters,
+    canopySheltered: wx.canopySheltered,
+    moistureFraction: overrides.deadMoisture,
+    deadMoistureFraction: overrides.deadMoisture,
+    liveMoistureFraction: overrides.liveMoisture,
+    deadMoistureByClass: wx.deadMoistureByClass,
+    liveMoistureByClass: wx.liveMoistureByClass,
+    weatherTimeline: wx.weatherTimeline,
+    midflameWindKmh: wx.midflameWindKmh,
+    windDirectionRadians: wx.windDirectionRadians,
+    defaultSlopeRadians: Math.atan(Math.max(0, overrides.slopeStrength)),
     defaultSlopeAspectEast: 0,
     defaultSlopeAspectNorth: 0,
     maxPropagationMinutes: MAX_PROPAGATION_MINUTES,
@@ -231,7 +325,11 @@ export async function runFromClick({ lat, lon }) {
       osm: urbanFootprints?.available ? 'OSM Overpass' : 'unavailable',
       fuelCrosswalk: 'landCoverToFuel.js',
       fuelCodeList: listFuelModelCodes(),
-      weather: 'flat default — calm, no wind (not yet wired to live weather)',
+      weather: wx?.manualWind
+        ? `manual override — ${overrides.windSpeed} km/h @ ${overrides.windDirection}deg`
+        : (wx?.weather
+          ? `Open-Meteo observed — midflame ${wx.midflameWindKmh.toFixed(1)} km/h${wx.weatherTimeline ? ' (time-varying)' : ''}`
+          : 'Open-Meteo unavailable — slider values'),
       terrain: 'flat — no DEM (not yet wired)'
     }
   };

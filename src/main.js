@@ -950,7 +950,21 @@ function handleGlobeClick(lat, lon) {
 
   // P3: real WorldCover + OSM ignition, draped onto the globe in place. The
   // block-scene run above still drives the timeline clock and metrics panels.
-  runFromClick({ lat, lon }).then((result) => {
+  // The scenario sliders override live weather on this path too, matching the
+  // block scene: a non-zero wind slider wins, otherwise Open-Meteo drives it.
+  const sliderParams = getSimulationParams();
+  runFromClick({
+    lat,
+    lon,
+    overrides: {
+      windSpeed: sliderParams.windSpeed,
+      windDirection: sliderParams.windDirection,
+      deadMoisture: sliderParams.deadMoisture,
+      liveMoisture: sliderParams.liveMoisture,
+      slopeStrength: sliderParams.slopeStrength,
+      useWeatherMoisture: sliderParams.useWeatherMoisture
+    }
+  }).then((result) => {
     const m = result.metrics;
     // The four diagnostics that actually explain an ignition outcome.
     console.info('[runFromClick]', {
