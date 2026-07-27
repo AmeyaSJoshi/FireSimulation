@@ -938,6 +938,8 @@ try {
   globeLOD = initGlobeLOD(cesiumGlobe.viewer, cesiumGlobe.tilesetPromise, () => viewMode.mode);
   // P6: same flat overlay as before, plus volumetric flames up close.
   fireDrape = createFireLOD(cesiumGlobe.viewer);
+  // Volumetric raymarched fire is on by default; window.__ignis.volumetric(false) disables it.
+  fireDrape.setVolumetric(true);
   globeReady = true;
   initViewModeToggle(viewMode);
   if (import.meta.env.DEV) {

@@ -35,6 +35,10 @@ const ARRIVAL_ENCODE_SCALE = 60;
 const BOX_HEIGHT_METERS = 40;
 const MARCH_STEPS = 32;
 const FRONT_WINDOW_MINUTES = 8.0;
+// Module-level: PostProcessStage names must be unique across the whole
+// collection, so a per-instance counter would collide if two overlays ever
+// shared one viewer.
+let stageCounter = 0;
 
 function buildArrivalTexture({ gridSize, arrivalMinutes }) {
   const canvas = document.createElement('canvas');
@@ -210,7 +214,7 @@ export function createVolumetricFire(viewer) {
   let centreWC = Cesium.Cartesian3.ZERO.clone();
   let enu = Cesium.Matrix4.IDENTITY.clone();
   let halfExtents = new Cesium.Cartesian3(1, 1, 1);
-  let arrivalCanvas = null;
+  let arrivalTexture = null;
   let active = false;
 
   const scratchAxis = new Cesium.Cartesian4();
@@ -223,15 +227,31 @@ export function createVolumetricFire(viewer) {
     );
   }
 
-  function ensureStage() {
-    if (stage) return;
+  // The arrival field MUST be sampled NEAREST. With the default LINEAR
+  // sampler the filter blends across the boundary between a burnable cell
+  // (alpha 255, real arrival) and a never-burns cell (alpha 0, RG 0); the
+  // blended texel decodes as "arrival ~ 0", which ignites a phantom ring
+  // around the whole field perimeter. Building the Texture explicitly is the
+  // only way to control the sampler here — a raw canvas uniform gets Cesium's
+  // linear default. (fireOverlay.js documents the same hazard.)
+  //
+  // The stage is rebuilt per ignition rather than reused. A sampler uniform
+  // must be a concrete value, not a per-frame callback, or Cesium re-resolves
+  // the texture every frame. Scalar/vector uniforms stay callbacks by design.
+  function rebuildStage() {
+    // Only the stage — NOT the texture, which build() has just created and
+    // is about to hand to this stage as a uniform.
+    if (stage) {
+      viewer.scene.postProcessStages.remove(stage);
+      stage = null;
+    }
     stage = viewer.scene.postProcessStages.add(new Cesium.PostProcessStage({
-      name: 'ignis_volumetric_fire',
+      name: `ignis_volumetric_fire_${stageCounter++}`,
       fragmentShader: FRAGMENT_SHADER,
       uniforms: {
+        uArrivalMap: arrivalTexture,
         uTime: () => timeMinutes,
         uActive: () => (active && enabled ? 1.0 : 0.0),
-        uArrivalMap: () => arrivalCanvas,
         uBoxCenterEC: () => Cesium.Matrix4.multiplyByPoint(
           viewer.scene.camera.viewMatrix, centreWC, new Cesium.Cartesian3()
         ),
@@ -241,6 +261,17 @@ export function createVolumetricFire(viewer) {
         uBoxHalfExtents: () => halfExtents
       }
     }));
+  }
+
+  function removeStage() {
+    if (stage) {
+      viewer.scene.postProcessStages.remove(stage);
+      stage = null;
+    }
+    if (arrivalTexture && !arrivalTexture.isDestroyed()) {
+      arrivalTexture.destroy();
+      arrivalTexture = null;
+    }
   }
 
   function build(result) {
@@ -270,10 +301,20 @@ export function createVolumetricFire(viewer) {
     halfExtents = new Cesium.Cartesian3(halfEast, halfNorth, halfUp);
     centreWC = Cesium.Cartesian3.fromDegrees(midLon, midLat, groundHeight + halfUp);
     enu = Cesium.Transforms.eastNorthUpToFixedFrame(centreWC);
-    arrivalCanvas = buildArrivalTexture({ gridSize, arrivalMinutes });
+    if (arrivalTexture && !arrivalTexture.isDestroyed()) arrivalTexture.destroy();
+    arrivalTexture = new Cesium.Texture({
+      context: viewer.scene.context,
+      source: buildArrivalTexture({ gridSize, arrivalMinutes }),
+      sampler: new Cesium.Sampler({
+        minificationFilter: Cesium.TextureMinificationFilter.NEAREST,
+        magnificationFilter: Cesium.TextureMagnificationFilter.NEAREST,
+        wrapS: Cesium.TextureWrap.CLAMP_TO_EDGE,
+        wrapT: Cesium.TextureWrap.CLAMP_TO_EDGE
+      })
+    });
     active = true;
 
-    ensureStage();
+    rebuildStage();
   }
 
   return {
@@ -288,13 +329,14 @@ export function createVolumetricFire(viewer) {
     setEnabled(next) {
       enabled = Boolean(next);
       if (enabled && pending) build(pending);
-      if (!enabled) active = false;
+      if (!enabled) { active = false; removeStage(); }
       return enabled;
     },
     get enabled() { return enabled; },
     clear() {
       pending = null;
       active = false;
+      removeStage();
     }
   };
 }
