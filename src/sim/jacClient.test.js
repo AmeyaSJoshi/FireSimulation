@@ -1,35 +1,54 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { runJacFire } from './jacClient.js';
+import { runJacFire, DEFAULT_JAC_ENDPOINT } from './jacClient.js';
+import { createJacFireRequest } from './jacFireContract.js';
 
-const request = { grid_size: 2 };
+// These previously asserted HTTP transport details (POST body, endpoint URL,
+// HTTP 503 surfacing). The solve now runs in-process, so what matters is that
+// the same request contract still yields a complete, well-formed arrival
+// field — not how it travelled.
 
-test('runJacFire posts the frozen contract and returns Jac arrivals', async () => {
-  let call = null;
-  const result = await runJacFire(request, {
-    endpoint: '/jac/walker/RunFire',
-    fetchImpl: async (url, options) => {
-      call = { url, options };
-      return {
-        ok: true,
-        json: async () => ({
-          data: { result: { reports: [{ arrivalMinutes: [0, 1, -1, 3] }] } }
-        })
-      };
-    }
+function buildRequest(gridSize = 8, overrides = {}) {
+  return createJacFireRequest({
+    fuelCodes: Array(gridSize ** 2).fill('GR2'),
+    gridSize,
+    cellSizeMeters: 10,
+    ignitionIndex: Math.floor((gridSize ** 2) / 2),
+    maxPropagationMinutes: 120,
+    deadMoistureFraction: 0.06,
+    liveMoistureFraction: 0.6,
+    midflameWindKmh: 12,
+    windDirectionRadians: 0,
+    ...overrides
   });
+}
 
-  assert.equal(call.url, '/jac/walker/RunFire');
-  assert.equal(call.options.method, 'POST');
-  assert.deepEqual(JSON.parse(call.options.body), request);
-  assert.deepEqual([...result.arrivalMinutes], [0, 1, Infinity, 3]);
+test('runJacFire solves locally and returns one arrival per cell', async () => {
+  const request = buildRequest(8);
+  const result = await runJacFire(request);
+
+  assert.equal(result.endpoint, DEFAULT_JAC_ENDPOINT);
+  assert.equal(result.arrivalMinutes.length, request.grid_size ** 2);
+  assert.equal(result.arrivalMinutes[request.ignition_index], 0);
+  const reached = [...result.arrivalMinutes].filter((value) => Number.isFinite(value)).length;
+  assert.ok(reached > 1, `expected spread beyond ignition, reached ${reached}`);
 });
 
-test('runJacFire surfaces a Jac service failure without a local fallback', async () => {
-  await assert.rejects(
-    runJacFire(request, {
-      fetchImpl: async () => ({ ok: false, status: 503 })
-    }),
-    /Jac fire service returned HTTP 503/
-  );
+test('runJacFire marks unreachable cells as Infinity, never negative', async () => {
+  const gridSize = 6;
+  const fuelCodes = Array(gridSize ** 2).fill('NB');
+  const ignitionIndex = 14;
+  fuelCodes[ignitionIndex] = 'GR2';
+  const result = await runJacFire(buildRequest(gridSize, { fuelCodes, ignitionIndex }));
+
+  assert.equal(result.arrivalMinutes[ignitionIndex], 0);
+  for (const value of result.arrivalMinutes) {
+    assert.ok(value === Infinity || value >= 0, 'arrival must be Infinity or non-negative');
+  }
+});
+
+test('runJacFire rejects when the solve is aborted', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(runJacFire(buildRequest(4), { signal: controller.signal }), /aborted/i);
 });

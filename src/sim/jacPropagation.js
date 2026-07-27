@@ -81,63 +81,25 @@ export function solveRateFieldInJavaScript(request) {
   return Float32Array.from(arrivals);
 }
 
-function extractJacArrivals(payload, expectedLength) {
-  const report = payload?.data?.result?.reports?.[0] ?? payload?.data?.reports?.[0];
-  const arrivals = report?.arrivalMinutes;
-  if (!Array.isArray(arrivals) || arrivals.length !== expectedLength) {
-    throw new Error('jacPropagation: Jac response did not contain a complete arrival field');
-  }
-  return Float32Array.from(arrivals, (value) => Number.isFinite(value) ? value : -1);
+// Previously raced a Jac /walker/Propagate call against the JS solver and
+// cross-checked them. With the service gone, the JS solver above IS the
+// engine — it was already the reference the remote result had to match.
+export async function propagateWithJac(request) {
+  return {
+    arrivalField: solveRateFieldInJavaScript(request),
+    engine: 'javascript-rate',
+    fallbackReason: null
+  };
 }
 
-export async function propagateWithJac(request, {
-  fetchImpl = globalThis.fetch,
-  endpoint = 'http://127.0.0.1:8010/walker/Propagate',
-  signal = undefined,
-  toleranceMinutes = 0.001
-} = {}) {
-  const fallback = solveRateFieldInJavaScript(request);
-  if (typeof fetchImpl !== 'function') {
-    return { arrivalField: fallback, engine: 'javascript-rate', fallbackReason: 'fetch unavailable' };
-  }
-  try {
-    const response = await fetchImpl(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        rates: Array.from(request.rates),
-        grid_size: request.gridSize,
-        cell_size_meters: request.cellSizeMeters,
-        ignition_index: request.ignitionIndex
-      }),
-      signal
-    });
-    if (!response.ok) throw new Error(`Jac returned HTTP ${response.status}`);
-    const jac = extractJacArrivals(await response.json(), fallback.length);
-    for (let index = 0; index < jac.length; index += 1) {
-      if (Math.abs(jac[index] - fallback[index]) > toleranceMinutes) {
-        throw new Error(`Jac mismatch at cell ${index}`);
-      }
-    }
-    return { arrivalField: jac, engine: 'jac', fallbackReason: null };
-  } catch (error) {
-    return { arrivalField: fallback, engine: 'javascript-rate', fallbackReason: error.message };
-  }
-}
-
-export async function propagateRothermelWithJac(request, {
-  fetchImpl = globalThis.fetch,
-  endpoint = undefined,
-  signal = undefined
-} = {}) {
-  // The sole production RunFire client. Keeping this adapter deliberately
-  // tiny lets runScenario retain its renderer-neutral result contract while
-  // ensuring Cesium and every scenario caller use identical transport,
-  // validation, endpoint selection, and failure behavior.
-  const result = await runJacFire(request, { fetchImpl, ...(endpoint ? { endpoint } : {}), signal });
+export async function propagateRothermelWithJac(request, { signal = undefined } = {}) {
+  // The sole production RunFire path. Keeping this adapter tiny lets
+  // runScenario retain its renderer-neutral result contract while every
+  // caller shares identical validation and failure behaviour.
+  const result = await runJacFire(request, { signal });
   return {
     arrivalField: Float32Array.from(result.arrivalMinutes, (arrival) => Number.isFinite(arrival) ? arrival : -1),
-    engine: 'jac-rothermel',
+    engine: 'javascript-rothermel',
     fallbackReason: null
   };
 }

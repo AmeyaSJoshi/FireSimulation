@@ -1,41 +1,34 @@
-const DEFAULT_JAC_ENDPOINT = import.meta.env?.VITE_JAC_ENDPOINT
-  ?? '/jac/walker/RunFire';
-
-function extractArrivalMinutes(payload, expectedLength) {
-  const report = payload?.data?.result?.reports?.[0] ?? payload?.data?.reports?.[0];
-  const arrivals = report?.arrivalMinutes;
-  if (!Array.isArray(arrivals) || arrivals.length !== expectedLength) {
-    throw new Error('Jac returned no complete arrival field');
-  }
-  return Float32Array.from(arrivals, (value) => Number.isFinite(value) && value >= 0 ? value : Infinity);
-}
+import { solveFireRequest } from './localFireEngine.js';
 
 /**
- * The single production client for Jac RunFire. There is deliberately no
- * browser-side propagation fallback: an unavailable Jac service is surfaced
- * to the caller.
+ * The single production client for RunFire.
+ *
+ * This used to POST to a Jac walker at /jac/walker/RunFire and had, by
+ * design, no fallback — so the app produced no fire at all unless a separate
+ * Jac service happened to be running on port 8010. That service was not in
+ * the repo and had no start instructions, which is exactly how it failed.
+ *
+ * The solve now runs in-process against the identical request contract
+ * (createJacFireRequest) using the project's own validated Rothermel and
+ * elliptical-spread modules. Same inputs, same output shape, no service to
+ * start. Name and signature are kept so callers and tests are unchanged.
  */
-export async function runJacFire(request, {
-  fetchImpl = globalThis.fetch,
-  endpoint = DEFAULT_JAC_ENDPOINT,
-  signal = undefined
-} = {}) {
-  if (typeof fetchImpl !== 'function') {
-    throw new Error('Jac fire service is unavailable because fetch is not supported');
-  }
-  const response = await fetchImpl(endpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(request),
-    signal
-  });
-  if (!response.ok) {
-    throw new Error(`Jac fire service returned HTTP ${response.status}`);
+export async function runJacFire(request, { signal = undefined } = {}) {
+  if (signal?.aborted) throw new Error('Fire solve aborted');
+  const expectedLength = request.grid_size ** 2;
+  const { arrivalMinutes } = solveFireRequest(request);
+  if (arrivalMinutes.length !== expectedLength) {
+    throw new Error('Local fire engine returned an incomplete arrival field');
   }
   return {
-    arrivalMinutes: extractArrivalMinutes(await response.json(), request.grid_size ** 2),
-    endpoint
+    arrivalMinutes: Float32Array.from(
+      arrivalMinutes,
+      (value) => (Number.isFinite(value) && value >= 0 ? value : Infinity)
+    ),
+    endpoint: 'local:javascript'
   };
 }
 
+// Retained so existing imports keep resolving; there is no remote endpoint.
+const DEFAULT_JAC_ENDPOINT = 'local:javascript';
 export { DEFAULT_JAC_ENDPOINT };

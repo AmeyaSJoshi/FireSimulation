@@ -237,22 +237,31 @@ test('runScenario can route the full fuel and terrain contract through Jac', asy
   assert.equal(result.arrivalField, field);
 });
 
-test('the Rothermel scenario adapter uses the canonical Jac client transport', async () => {
-  let call = null;
-  const result = await propagateRothermelWithJac({ grid_size: 2 }, {
-    endpoint: '/jac/walker/RunFire',
-    fetchImpl: async (url, options) => {
-      call = { url, options };
-      return {
-        ok: true,
-        json: async () => ({ data: { reports: [{ arrivalMinutes: [0, 1, -1, 3] }] } })
-      };
-    }
-  });
-  assert.equal(call.url, '/jac/walker/RunFire');
-  assert.deepEqual(JSON.parse(call.options.body), { grid_size: 2 });
-  assert.deepEqual([...result.arrivalField], [0, 1, -1, 3]);
-  assert.equal(result.engine, 'jac-rothermel');
+test('the Rothermel scenario adapter solves in-process and normalizes unreachable cells', async () => {
+  // Was: asserted the HTTP POST url/body to the Jac walker. The solve is now
+  // local, so this asserts the contract that actually matters — a complete
+  // arrival field with unreachable cells normalized to -1.
+  const gridSize = 6;
+  const fuelCodes = Array(gridSize ** 2).fill('NB');
+  const ignitionIndex = 14;
+  fuelCodes[ignitionIndex] = 'GR2';
+  const result = await propagateRothermelWithJac(createJacFireRequest({
+    fuelCodes,
+    gridSize,
+    cellSizeMeters: 10,
+    ignitionIndex,
+    maxPropagationMinutes: 120,
+    deadMoistureFraction: 0.06,
+    liveMoistureFraction: 0.6,
+    midflameWindKmh: 12,
+    windDirectionRadians: 0
+  }));
+
+  assert.equal(result.engine, 'javascript-rothermel');
+  assert.equal(result.arrivalField.length, gridSize ** 2);
+  assert.equal(result.arrivalField[ignitionIndex], 0);
+  // Non-burnable surroundings are unreachable and must normalize to -1.
+  assert.ok([...result.arrivalField].some((value) => value === -1));
 });
 
 test('runScenario carries multi-row weather through the Jac physical contract', async () => {
@@ -420,30 +429,24 @@ test('Jac fire contract preserves fuel-class moisture for the Rothermel kernel',
   assert.deepEqual(request.live_moistures_by_model, [[0.45, 0.8]]);
 });
 
-test('rate solver matches a Jac-shaped response and preserves unreachable cells', async () => {
+test('rate solver produces the arrival field and preserves unreachable cells', async () => {
+  // Was: fed a fake Jac HTTP response and asserted the JS result matched it,
+  // plus an offline-fallback path. There is no remote engine to cross-check
+  // or fall back from now — the JS solver is the engine, so this asserts its
+  // output directly.
   const request = {
     rates: new Float32Array([1, 1, 0, 1]),
     gridSize: 2,
     cellSizeMeters: 10,
     ignitionIndex: 0
   };
-  const fallback = solveRateFieldInJavaScript(request);
-  assert.deepEqual([...fallback], [0, 10, -1, 14.142135620117188]);
-  const result = await propagateWithJac(request, {
-    fetchImpl: async () => ({
-      ok: true,
-      json: async () => ({ data: { reports: [{ arrivalMinutes: [...fallback] }] } })
-    })
-  });
-  assert.equal(result.engine, 'jac');
-  assert.deepEqual([...result.arrivalField], [...fallback]);
+  const expected = solveRateFieldInJavaScript(request);
+  assert.deepEqual([...expected], [0, 10, -1, 14.142135620117188]);
 
-  const offline = await propagateWithJac(request, {
-    fetchImpl: async () => { throw new Error('offline'); }
-  });
-  assert.equal(offline.engine, 'javascript-rate');
-  assert.match(offline.fallbackReason, /offline/);
-  assert.deepEqual([...offline.arrivalField], [...fallback]);
+  const result = await propagateWithJac(request);
+  assert.equal(result.engine, 'javascript-rate');
+  assert.equal(result.fallbackReason, null);
+  assert.deepEqual([...result.arrivalField], [...expected]);
 });
 
 test('rate field preserves non-burnable cells', () => {

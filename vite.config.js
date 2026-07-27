@@ -756,16 +756,7 @@ function worldCoverFinePlugin() {
 export default defineConfig({
   plugins: [worldCoverFinePlugin(), cesium()],
   server: {
-    host: '127.0.0.1',
-    proxy: {
-      // Keep the browser on the Vite origin in local development so the Jac
-      // API does not need a separate CORS configuration.
-      '/jac': {
-        target: 'http://127.0.0.1:8010',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/jac/, '')
-      }
-    }
+    host: '127.0.0.1'
   },
   build: {
     rollupOptions: {
