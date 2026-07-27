@@ -5,10 +5,6 @@ import * as Cesium from 'cesium';
 // primitive. NO physics here: this file only decides how an already-solved
 // arrival time looks.
 //
-// The previous version had no clock at all (nothing ever advanced it) and
-// rebuilt a canvas + a new ImageMaterialProperty on every update, pushing a
-// fresh texture through the entity property system each time. Both are gone:
-//
 //   - Arrival times are baked into ONE RGBA texture, uploaded ONCE at
 //     ignition, never rebuilt during playback.
 //   - One GroundPrimitive with a custom Cesium.Material whose only mutable
@@ -17,12 +13,23 @@ import * as Cesium from 'cesium';
 //     allocation, no texture upload, no geometry rebuild.
 //
 // Scrubbing is therefore free: setTime writes one float.
+//
+// PFIX5 (demo visibility): a real 10m cell is imperceptible at any framing
+// wide enough to show a 640m field. The fragment shader now splats each
+// live cell across a VISUAL_CELL_SCALE-cell radius with soft falloff, so a
+// 1-cell fire still reads as an organic blob rather than a single pixel.
+export const VISUAL_CELL_SCALE = 2.5; // demo scaling, not physical size
 
 // Arrival minutes are packed into R+G as a 16-bit fixed-point value so the
 // front band stays smooth at 10 m cells; B carries a normalized fuel index
 // for tinting, A flags "this cell ever burns" (0 = never, arrival Infinity).
 const ARRIVAL_ENCODE_SCALE = 60; // 1/60 min per unit => ~1s resolution
-const FRONT_WINDOW_MINUTES = 1.5; // 90 s bright leading edge
+// Widened from the original 1.5 min: combined with the splat radius above,
+// this keeps the leading edge a visibly thick, slow-pulsing band instead of
+// a thin line that vanishes between ticks on a slow-spreading fire.
+const FRONT_WINDOW_MINUTES = 3.0;
+const IGNITION_FLARE_MS = 2000;
+const IGNITION_FLARE_MAX_RADIUS_M = 60;
 
 // Denser fuel burns hotter/taller. Index into provenance.fuelCodeList; the
 // leading GR*/GS* grass codes are short, SH* brush mid, TU*/TL* timber tallest.
@@ -59,48 +66,130 @@ function buildArrivalTexture({ gridSize, arrivalMinutes, fuelCodes }) {
 
 // Row 0 of the sim grid is north (spatialGrid convention), but a Cesium
 // Rectangle's v axis runs south->north, so the shader flips v when sampling.
-const FIRE_MATERIAL_SHADER = /* glsl */`
+//
+// gridSize is baked in as a compile-time constant (not a uniform) because it
+// never changes mid-run and GLSL's `for` loop bounds need to stay simple.
+function buildFireMaterialShader(gridSize) {
+  return /* glsl */`
+const float GRID_SIZE = ${gridSize.toFixed(1)};
+const float VISUAL_CELL_SCALE = ${VISUAL_CELL_SCALE.toFixed(2)};
+const int KERNEL = 3; // ceil(VISUAL_CELL_SCALE) + 1 margin cell
+
+float decodeArrival(vec4 texel) {
+  return (texel.r * 255.0 + texel.g * 255.0 * 256.0) / ${ARRIVAL_ENCODE_SCALE}.0;
+}
+
 czm_material czm_getMaterial(czm_materialInput materialInput) {
   czm_material material = czm_getDefaultMaterial(materialInput);
   vec2 uv = vec2(materialInput.st.x, 1.0 - materialInput.st.y);
-  vec4 texel = texture(arrivalMap, uv);
+  vec2 cellPos = uv * GRID_SIZE;
+  vec2 baseCell = floor(cellPos);
+  vec2 texel1 = vec2(1.0) / GRID_SIZE;
 
-  // Cells that never ignite stay fully transparent.
-  if (texel.a < 0.5) {
+  // Splat: search a fixed neighbourhood and take the nearest cell (by burn
+  // age) that has already ignited within VISUAL_CELL_SCALE cells of this
+  // fragment. This is what turns a single burning pixel into a visible blob,
+  // and lets adjacent blobs merge into one organic shape instead of a grid
+  // of squares.
+  float bestAge = 1.0e6;
+  float bestIntensity = 0.0;
+  float bestWeight = 0.0;
+
+  for (int dx = -KERNEL; dx <= KERNEL; dx += 1) {
+    for (int dy = -KERNEL; dy <= KERNEL; dy += 1) {
+      vec2 neighborCell = baseCell + vec2(float(dx), float(dy));
+      if (neighborCell.x < 0.0 || neighborCell.y < 0.0 ||
+          neighborCell.x >= GRID_SIZE || neighborCell.y >= GRID_SIZE) continue;
+      float dist = length(cellPos - (neighborCell + 0.5));
+      if (dist > VISUAL_CELL_SCALE) continue;
+      vec2 nuv = (neighborCell + 0.5) * texel1;
+      vec4 ntex = texture(arrivalMap, nuv);
+      if (ntex.a < 0.5) continue;
+      float narrival = decodeArrival(ntex);
+      if (narrival > uTime) continue;
+      float age = uTime - narrival;
+      if (age < bestAge) {
+        bestAge = age;
+        bestIntensity = ntex.b;
+        // Soft falloff at the splat edge so overlapping splats merge.
+        bestWeight = 1.0 - smoothstep(VISUAL_CELL_SCALE * 0.55, VISUAL_CELL_SCALE, dist);
+      }
+    }
+  }
+
+  if (bestWeight <= 0.0) {
     material.alpha = 0.0;
     return material;
   }
 
-  float arrival = (texel.r * 255.0 + texel.g * 255.0 * 256.0) / ${ARRIVAL_ENCODE_SCALE}.0;
-  float intensity = texel.b;
-
-  // Not yet reached by the front.
-  if (arrival > uTime) {
-    material.alpha = 0.0;
-    return material;
-  }
-
-  float age = uTime - arrival;
-  // 1.0 exactly at the front, falling to 0.0 by the end of the window.
-  float front = 1.0 - clamp(age / uFrontWindow, 0.0, 1.0);
-  // Sharpen so the leading edge reads as a band, not a broad gradient, and
-  // give it an emissive falloff so it looks like fire rather than a polygon.
+  float front = 1.0 - clamp(bestAge / uFrontWindow, 0.0, 1.0);
   float glow = pow(front, 2.2);
 
-  vec3 charColor = vec3(0.10, 0.085, 0.078);
-  vec3 emberColor = vec3(0.85, 0.22, 0.04);
-  vec3 flameColor = vec3(1.0, 0.75, 0.25);
+  // The front band stays visibly alive even when spread has stalled: pulse
+  // its emission on uTime rather than relying purely on age.
+  float pulse = 0.82 + 0.18 * sin(uTime * 5.5);
+  float frontPulse = glow * pulse;
 
-  vec3 color = mix(charColor, emberColor, glow * 0.85);
-  color = mix(color, flameColor, pow(glow, 3.0));
+  // Per-cell hash so the charcoal ember flicker doesn't read as one uniform
+  // strobe across the whole burn scar.
+  float cellHash = fract(sin(dot(baseCell, vec2(12.9898, 78.233))) * 43758.5453);
+  float emberFlicker = 0.85 + 0.15 * sin(uTime * 3.0 + cellHash * 6.2831);
+
+  // Contrast floors: charcoal never disappears against pale dirt, and the
+  // active front is near-white/yellow so it blooms over dark forest too.
+  vec3 charColor = vec3(0.10, 0.085, 0.078) * emberFlicker;
+  vec3 emberColor = vec3(0.9, 0.24, 0.05);
+  vec3 flameColor = vec3(1.0, 0.93, 0.75);
+
+  vec3 color = mix(charColor, emberColor, frontPulse * 0.85);
+  color = mix(color, flameColor, pow(frontPulse, 2.0));
 
   material.diffuse = color;
-  // Emission is what makes the front band bloom instead of reading flat.
-  material.emission = color * glow * (1.2 + 1.6 * intensity);
-  material.alpha = mix(0.82, 1.0, glow);
+  material.emission = color * frontPulse * (1.6 + 2.0 * bestIntensity);
+  float baseAlpha = mix(0.75, 1.0, frontPulse);
+  material.alpha = baseAlpha * bestWeight;
   return material;
 }
 `;
+}
+
+// A 2s expanding ring + glow at the ignition cell. Purely cosmetic — guides
+// the eye to the click point even when the eventual burn stays tiny.
+function playIgnitionFlare(viewer, { latitude, longitude, groundHeightMeters }) {
+  const startMs = performance.now();
+  const position = Cesium.Cartesian3.fromDegrees(longitude, latitude, groundHeightMeters + 1);
+  const radius = () => {
+    const t = Math.min(1, (performance.now() - startMs) / IGNITION_FLARE_MS);
+    return 4 + Cesium.Math.lerp(0, IGNITION_FLARE_MAX_RADIUS_M, 1 - Math.pow(1 - t, 2));
+  };
+  const entity = viewer.entities.add({
+    position,
+    ellipse: {
+      semiMinorAxis: new Cesium.CallbackProperty(radius, false),
+      semiMajorAxis: new Cesium.CallbackProperty(radius, false),
+      height: groundHeightMeters + 1,
+      outline: true,
+      outlineWidth: 2,
+      outlineColor: new Cesium.CallbackProperty(() => {
+        const t = Math.min(1, (performance.now() - startMs) / IGNITION_FLARE_MS);
+        return Cesium.Color.fromBytes(255, 240, 200, Math.round((1 - t) * 255));
+      }, false),
+      material: new Cesium.ColorMaterialProperty(new Cesium.CallbackProperty(() => {
+        const t = Math.min(1, (performance.now() - startMs) / IGNITION_FLARE_MS);
+        return Cesium.Color.fromBytes(255, 225, 150, Math.round((1 - t) * 140));
+      }, false))
+    }
+  });
+  setTimeout(() => viewer.entities.remove(entity), IGNITION_FLARE_MS + 100);
+}
+
+// Cesium caches Material fabrics by `type` and, on a cache hit, clones the
+// cached template's uniform defaults to build the new instance. Reusing one
+// fixed type string across ignitions made it try to clone the PREVIOUS
+// run's arrivalMap canvas — `new HTMLCanvasElement()` is an illegal
+// constructor, so the second click on any session threw here. A unique
+// type per ignition guarantees a fresh (uncached) material every time.
+let fireMaterialTypeCounter = 0;
 
 export function createFireOverlay(viewer) {
   let primitive = null;
@@ -154,13 +243,13 @@ export function createFireOverlay(viewer) {
 
       material = new Cesium.Material({
         fabric: {
-          type: 'FireArrival',
+          type: `FireArrival_${fireMaterialTypeCounter++}`,
           uniforms: {
             arrivalMap: buildArrivalTexture({ gridSize, arrivalMinutes, fuelCodes }),
             uTime: 0,
             uFrontWindow: FRONT_WINDOW_MINUTES
           },
-          source: FIRE_MATERIAL_SHADER
+          source: buildFireMaterialShader(gridSize)
         },
         translucent: true
       });
@@ -183,6 +272,25 @@ export function createFireOverlay(viewer) {
         classificationType: Cesium.ClassificationType.BOTH
       });
       viewer.scene.primitives.add(primitive);
+
+      // Ignition is always at the field centre (see runFromClick's FIELD_CENTER),
+      // which is exactly the bbox centre.
+      let groundHeightMeters = 0;
+      if (typeof viewer.scene.sampleHeight === 'function') {
+        try {
+          const centre = Cesium.Cartographic.fromDegrees(
+            (bbox[0] + bbox[2]) / 2,
+            (bbox[1] + bbox[3]) / 2
+          );
+          const sampled = viewer.scene.sampleHeight(centre);
+          if (Number.isFinite(sampled)) groundHeightMeters = sampled;
+        } catch { /* no pickable surface; flare draws at ellipsoid height */ }
+      }
+      playIgnitionFlare(viewer, {
+        latitude: (bbox[1] + bbox[3]) / 2,
+        longitude: (bbox[0] + bbox[2]) / 2,
+        groundHeightMeters
+      });
 
       applyTime(0);
       playing = true;

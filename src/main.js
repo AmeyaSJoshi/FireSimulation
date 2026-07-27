@@ -50,6 +50,7 @@ import { buildFuelColorField, createBlockScene } from './renderers/blockScene.js
 import { initCesiumGlobe } from './globe/cesiumGlobe.js';
 import { MAX_PROPAGATION_MINUTES, runFromClick } from './sim/runFromClick.js';
 import { createFireLOD } from './globe/fireLOD.js';
+import { VISUAL_CELL_SCALE } from './globe/fireOverlay.js';
 import { initGlobeLOD } from './globe/globeLOD.js';
 import './styles.css';
 
@@ -999,6 +1000,12 @@ function handleGlobeClick(lat, lon, groundHeightMeters = 0) {
     if (DRAPE_ON_GLOBE) {
       fireDrape?.show(result);
       startDrapePlayback(result);
+      const framedRangeMeters = frameBurnExtent(result, groundHeightMeters);
+      console.info('[fireVisual]', {
+        visualScale: VISUAL_CELL_SCALE,
+        framedRangeMeters,
+        burnedCellCount: m.burnedCellCount
+      });
     }
   }).catch((error) => console.warn('[runFromClick] failed:', error));
 }
@@ -1012,6 +1019,48 @@ function handleGlobeClick(lat, lon, groundHeightMeters = 0) {
 // nearly every run, so playback stopped before the fire had visibly moved.
 // Playback now always runs to maxFiniteArrivalMinutes — the last time
 // anything actually ignites — and only then reports an outcome.
+// PFIX5: reframe the camera around the actual burn extent once it's known,
+// rather than the fixed-range swoop fired at click time (kept for immediate
+// feedback, before runFromClick has resolved). A 5-cell fire at 640m-field
+// framing is a few pixels; this makes it fill a meaningful share of the view.
+// Returns the range actually used, purely for the [fireVisual] diagnostic.
+function frameBurnExtent(result, groundHeightMeters) {
+  const { gridSize, bbox, arrivalMinutes, cellSizeMeters } = result;
+  const [west, south, east, north] = bbox;
+  let minRow = Infinity, maxRow = -Infinity, minCol = Infinity, maxCol = -Infinity;
+  for (let i = 0; i < arrivalMinutes.length; i += 1) {
+    if (!Number.isFinite(arrivalMinutes[i])) continue;
+    const row = Math.floor(i / gridSize);
+    const col = i % gridSize;
+    if (row < minRow) minRow = row;
+    if (row > maxRow) maxRow = row;
+    if (col < minCol) minCol = col;
+    if (col > maxCol) maxCol = col;
+  }
+  if (!Number.isFinite(minRow)) return null; // nothing burns; keep the click-time framing
+
+  const northLat = north - (minRow / gridSize) * (north - south);
+  const southLat = north - ((maxRow + 1) / gridSize) * (north - south);
+  const westLon = west + (minCol / gridSize) * (east - west);
+  const eastLon = west + ((maxCol + 1) / gridSize) * (east - west);
+  const centerLat = (northLat + southLat) / 2;
+  const centerLon = (westLon + eastLon) / 2;
+
+  const widthMeters = (maxCol - minCol + 1) * cellSizeMeters;
+  const heightMeters = (maxRow - minRow + 1) * cellSizeMeters;
+  const diagonalMeters = Math.hypot(widthMeters, heightMeters);
+  const rangeMeters = Math.max(120, diagonalMeters * 1.3); // ~30% padding, 120m floor
+
+  cesiumGlobe?.flyToAerial({
+    latitude: centerLat,
+    longitude: centerLon,
+    groundHeightMeters,
+    rangeMeters,
+    duration: 1.2
+  });
+  return rangeMeters;
+}
+
 function formatDrapeOutcome({ burnedCellCount, maxFiniteArrivalMinutes, cellAreaSquareMeters }) {
   if (burnedCellCount === 0) return 'No burnable fuel at this location';
   if (burnedCellCount < 10) return `Fire contained by roads and structures (${burnedCellCount} cells)`;

@@ -1,5 +1,5 @@
 import * as Cesium from 'cesium';
-import { createFireOverlay } from './fireOverlay.js';
+import { createFireOverlay, VISUAL_CELL_SCALE } from './fireOverlay.js';
 
 // Altitude-gated fire detail.
 //
@@ -25,7 +25,9 @@ import { createFireOverlay } from './fireOverlay.js';
 //
 // Reads only the frozen runFromClick() contract (arrivalMinutes / fuelCodes /
 // bbox / gridSize). No physics, no sim data touched.
-export const CLOSE_ALTITUDE_M = 250;
+// PFIX5: raised from 250 so the demo reaches volumetric flames without
+// diving to near-ground altitude first.
+export const CLOSE_ALTITUDE_M = 600;
 
 const MAX_VOLUMETRIC_CELLS = 48;
 const RENDER_DISTANCE_M = 900;
@@ -34,7 +36,9 @@ const UPDATE_THROTTLE_MS = 140;
 // volume, smouldering cells stay as the base layer's dim points.
 const FRONT_WINDOW_MINUTES = 90 / 60;
 const FLAME_LIFT_METERS = 3;
-const CELL_BOUNDING_RADIUS_M = 12;
+// Scaled by VISUAL_CELL_SCALE so a demo-sized (splatted) flame isn't culled
+// by a bounding sphere sized for the true 10m cell.
+const CELL_BOUNDING_RADIUS_M = 12 * VISUAL_CELL_SCALE;
 
 function flameScaleForFuel(fuelIndex) {
   if (fuelIndex >= 18) return 2.2;  // TU*/TL* timber
@@ -82,7 +86,7 @@ export function createFireLOD(viewer) {
         maximumParticleLife: 1.4,
         minimumSpeed: 3.0,
         maximumSpeed: 8.0,
-        imageSize: new Cesium.Cartesian2(2.0, 2.0),
+        imageSize: new Cesium.Cartesian2(2.0 * VISUAL_CELL_SCALE, 2.0 * VISUAL_CELL_SCALE),
         emissionRate: 24,
         // Metres, not pixels — flames must keep physical size as you approach.
         sizeInMeters: true,
@@ -171,7 +175,7 @@ export function createFireLOD(viewer) {
       const system = pool[slot];
       const scale = flameScaleForFuel(fuelCodes[index]);
       system.modelMatrix = Cesium.Transforms.eastNorthUpToFixedFrame(cellPositions[index]);
-      system.imageSize = new Cesium.Cartesian2(1.4 * scale, 1.4 * scale);
+      system.imageSize = new Cesium.Cartesian2(1.4 * scale * VISUAL_CELL_SCALE, 1.4 * scale * VISUAL_CELL_SCALE);
       system.emissionRate = 14 + 22 * heat * scale;
       system.maximumSpeed = 5.0 + 5.0 * scale;
       system.minimumSpeed = 2.5 * scale;
