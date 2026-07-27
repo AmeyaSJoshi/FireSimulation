@@ -1,5 +1,6 @@
 import * as Cesium from 'cesium';
 import { createFireOverlay, VISUAL_CELL_SCALE } from './fireOverlay.js';
+import { createVolumetricFire } from './volumetricFire.js';
 
 // Altitude-gated fire detail.
 //
@@ -133,6 +134,8 @@ function makeParticleImage() {
 
 export function createFireLOD(viewer) {
   const base = createFireOverlay(viewer);
+  // Raymarched volume, flagged off by default (window.__ignis.volumetric).
+  const volumetric = createVolumetricFire(viewer);
   const particleImage = makeParticleImage();
 
   let result = null;
@@ -295,6 +298,7 @@ export function createFireLOD(viewer) {
   return {
     show(nextResult) {
       base.show(nextResult);
+      volumetric.show(nextResult);
       result = nextResult;
       timeMinutes = 0;
       buildCellPositions();
@@ -308,6 +312,7 @@ export function createFireLOD(viewer) {
 
     setTime(minutes) {
       base.setTime(minutes);
+      volumetric.setTime(minutes);
       timeMinutes = minutes;
       dirty = true;
     },
@@ -325,10 +330,21 @@ export function createFireLOD(viewer) {
 
     onTime(cb) {
       base.onTime((minutes) => {
+        volumetric.setTime(minutes);
         timeMinutes = minutes;
         dirty = true;
         cb?.(minutes);
       });
+    },
+
+    // Raymarched volumetric fire. Off by default: it is a full-screen
+    // post-process, so it is opt-in until validated on the target machine.
+    setVolumetric(next) {
+      return volumetric.setEnabled(next);
+    },
+
+    get volumetricEnabled() {
+      return volumetric.enabled;
     },
 
     // PFIX7b dev diagnostic passthrough — see fireOverlay.js.
@@ -338,6 +354,7 @@ export function createFireLOD(viewer) {
 
     clear() {
       base.clear();
+      volumetric.clear();
       if (removeListener) removeListener();
       removeListener = null;
       destroyPool();

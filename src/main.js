@@ -941,7 +941,11 @@ try {
   globeReady = true;
   initViewModeToggle(viewMode);
   if (import.meta.env.DEV) {
-    window.__ignis = { viewer: cesiumGlobe.viewer, fireDrape, globe: cesiumGlobe, globeLOD, viewMode, geocoder };
+    window.__ignis = {
+      viewer: cesiumGlobe.viewer, fireDrape, globe: cesiumGlobe, globeLOD, viewMode, geocoder,
+      // Raymarched volumetric fire: window.__ignis.volumetric(true)
+      volumetric: (on = true) => fireDrape?.setVolumetric(on)
+    };
   }
   cesiumGlobe.onGlobeClick(({ lat, lon, groundHeightMeters }) => {
     handleGlobeClick(lat, lon, groundHeightMeters);
