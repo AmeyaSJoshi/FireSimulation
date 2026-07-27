@@ -1,6 +1,6 @@
 import * as Cesium from 'cesium';
 
-// Fire overlay. Reads the canonical Jac scenario result (arrivalMinutes /
+// Fire overlay. Reads the canonical scenario result (arrivalMinutes /
 // fuelCodes) and renders it as a single ground-draped
 // primitive. NO physics here: this file only decides how an already-solved
 // arrival time looks.
@@ -341,7 +341,7 @@ export function createFireOverlay(viewer) {
   }
 
   return {
-    // result: the canonical Jac scenario result from runScenario()
+    // result: the canonical scenario result from runScenario()
     show(nextResult) {
       clear();
       result = nextResult;

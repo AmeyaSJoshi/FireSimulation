@@ -20,8 +20,8 @@ Modules:
 - `scenarioContours.js` derives GeoJSON contours and an active front from a raw
   arrival field. Renderers may use it, but it is not Cesium-specific.
 - `rateField.js` turns each cell's existing fuel and weather inputs into a
-  rate-in-metres-per-minute field for the Jac traversal contract.
-- `jacClient.js` is the single `RunFire` transport. `jacPropagation.js` is a
+  rate-in-metres-per-minute field for the traversal contract.
+- `fireClient.js` is the single `RunFire` transport. `propagation.js` is a
   thin scenario-result adapter over that client; it does not own a second HTTP
   path or fallback.
 - `globeScenarioBridge.js` is the Cesium-ready seam. It accepts a precise globe
@@ -47,8 +47,8 @@ runScenario({
 ```
 
 By default, `runScenario` uses the existing validated physical propagation
-engine. The Cesium app passes `{ propagation: 'jac-rothermel' }`, which invokes
-`propagateRothermelWithJac` as the required solver. `{ propagation: 'jac' }`
+engine. The Cesium app passes `{ propagation: 'rothermel' }`, which invokes
+`propagateRothermel` as the required solver. `{ propagation: 'rate' }`
 remains available for the simpler precomputed-rate traversal demonstration.
 
 The result describes the fire, rather than choosing its visual representation:
@@ -93,11 +93,11 @@ implementation is replaced.
 There is one production ignition path:
 
 ```
-Cesium click -> scenarioGateway -> runScenario -> jacClient -> Jac RunFire
+Cesium click -> scenarioGateway -> runScenario -> fireClient -> local engine
 ```
 
 The gateway is configured with `createViteScenarioAdapters()` and
-`propagation: 'jac-rothermel'`. A missing or invalid Jac response is presented
+`propagation: 'rothermel'`. An invalid solve result is presented
 to the user as an error; it is never replaced by browser-side propagation.
 
 ## Globe Integration
@@ -115,7 +115,7 @@ when a newer globe click arrives.
 `frame` contains the scenario bounding box, fixed grid dimensions, and a
 `Uint8Array` whose values are `0` unburned, `1` burned, and `2` active front.
 Cesium can map those values to a canvas or ground primitive without learning
-about fuel models, weather providers, or Jac.
+about fuel models or weather providers.
 
 For one polished uncertainty-aware fire instead of nine visible runs, use
 `createGlobeEnsembleController()`. Its result includes

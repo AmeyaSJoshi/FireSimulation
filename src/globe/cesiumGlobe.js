@@ -123,7 +123,7 @@ export function initCesiumGlobe() {
     // ellipsoid when clicking from orbit. Passing that negative height into
     // the close-up flight put the camera and flames underground. Prefer a
     // plausible picked/sample height and use a safe continental estimate
-    // until the Jac terrain field supplies the exact local elevation.
+    // until the terrain field supplies the exact local elevation.
     const plausible = (value) => Number.isFinite(value) && value >= -500 && value <= 9_000;
     const groundHeightMeters = plausible(carto.height)
       ? carto.height

@@ -5,10 +5,10 @@ import { activeFireCells } from './scenarioContours.js';
 import { createFallbackScenarioAdapters, createViteScenarioAdapters } from './scenarioAdapters.js';
 import { runScenario } from './runScenario.js';
 import { createRateField } from './rateField.js';
-import { propagateRothermelWithJac, propagateWithJac, solveRateFieldInJavaScript } from './jacPropagation.js';
+import { propagateRothermel, propagateRateField, solveRateField } from './propagation.js';
 import { clearEnvironmentalRequestCache, loadEnvironmentalContext } from './environmentalAdapters.js';
 import { createSpatialGrid } from '../lib/spatialGrid.js';
-import { createJacFireRequest } from './jacFireContract.js';
+import { createFireRequest } from './fireContract.js';
 import { createGlobeEnsembleController, createGlobeScenarioController, createMockGlobeClick, fireOverlayFrame, normalizeGlobeClick } from './globeScenarioBridge.js';
 import { aggregateScenarioMembers, clearScenarioEnsembleCache, defaultEnsembleVariants, runScenarioEnsemble } from './scenarioEnsemble.js';
 import { createScenarioGateway, normalizeScenarioRequest, serializeScenarioResult } from './scenarioGateway.js';
@@ -36,7 +36,7 @@ test('globe bridge preserves click precision and produces a scrub-ready fire fra
   const bridge = createGlobeScenarioController({
     runScenarioImpl: async (request, options) => {
       assert.deepEqual(request, click);
-      assert.equal(options.propagation, 'jac-rothermel');
+      assert.equal(options.propagation, 'rothermel');
       return scenario;
     }
   });
@@ -103,9 +103,9 @@ test('scenario gateway keeps the renderer contract geographic, cancellable, and 
   const ensembleGateway = createScenarioGateway({
     adapters: { loadContext() {} },
     ensembleOptions: { scenarioOptions: { propagation: 'physical' } },
-    scenarioOptions: { propagation: 'jac-rothermel' },
+    scenarioOptions: { propagation: 'rothermel' },
     runEnsembleImpl: async (_nextRequest, options) => {
-      assert.equal(options.scenarioOptions.propagation, 'jac-rothermel');
+      assert.equal(options.scenarioOptions.propagation, 'rothermel');
       assert.equal(options.cache, false);
       assert.equal(options.signal instanceof AbortSignal, true);
       assert.equal(options.adapters.loadContext instanceof Function, true);
@@ -205,47 +205,47 @@ test('runScenario accepts the gateway null values for unset weather overrides', 
   assert.equal(result.simulation.horizonMinutes, 720);
 });
 
-test('runScenario can route through Jac with a JavaScript-safe fallback contract', async () => {
+test('runScenario can route through the rate propagation contract', async () => {
   const field = new Float32Array(64 * 64);
   field.fill(7);
   const result = await runScenario({ ignition: { latitude: 37, longitude: -122 } }, {
-    propagation: 'jac',
+    propagation: 'rate',
     propagate: async (request) => {
       assert.equal(request.rates.length, 64 * 64);
       assert.equal(request.ignitionIndex, 2080);
-      return { arrivalField: field, engine: 'jac', fallbackReason: null };
+      return { arrivalField: field, engine: 'rate', fallbackReason: null };
     }
   });
-  assert.equal(result.simulation.engine, 'jac');
+  assert.equal(result.simulation.engine, 'rate');
   assert.equal(result.arrivalField, field);
 });
 
-test('runScenario can route the full fuel and terrain contract through Jac', async () => {
+test('runScenario can route the full fuel and terrain contract through Rothermel', async () => {
   const field = new Float32Array(64 * 64);
   const result = await runScenario({ ignition: { latitude: 37, longitude: -122 } }, {
-    propagation: 'jac-rothermel',
+    propagation: 'rothermel',
     propagateRothermel: async (request) => {
       assert.equal(request.fuel_model_indices.length, 4_096);
       assert.equal(request.terrain_heights.length, 4_096);
       assert.equal(request.midflame_winds_by_model.length, 1);
       assert.equal(request.max_propagation_minutes, 720);
       assert.equal(request.grid_size, 64);
-      return { arrivalField: field, engine: 'jac-rothermel', fallbackReason: null };
+      return { arrivalField: field, engine: 'rothermel', fallbackReason: null };
     }
   });
-  assert.equal(result.simulation.engine, 'jac-rothermel');
+  assert.equal(result.simulation.engine, 'rothermel');
   assert.equal(result.arrivalField, field);
 });
 
 test('the Rothermel scenario adapter solves in-process and normalizes unreachable cells', async () => {
-  // Was: asserted the HTTP POST url/body to the Jac walker. The solve is now
+  // Was: asserted the HTTP POST url/body to the remote walker. The solve is now
   // local, so this asserts the contract that actually matters — a complete
   // arrival field with unreachable cells normalized to -1.
   const gridSize = 6;
   const fuelCodes = Array(gridSize ** 2).fill('NB');
   const ignitionIndex = 14;
   fuelCodes[ignitionIndex] = 'GR2';
-  const result = await propagateRothermelWithJac(createJacFireRequest({
+  const result = await propagateRothermel(createFireRequest({
     fuelCodes,
     gridSize,
     cellSizeMeters: 10,
@@ -257,18 +257,18 @@ test('the Rothermel scenario adapter solves in-process and normalizes unreachabl
     windDirectionRadians: 0
   }));
 
-  assert.equal(result.engine, 'javascript-rothermel');
+  assert.equal(result.engine, 'rothermel');
   assert.equal(result.arrivalField.length, gridSize ** 2);
   assert.equal(result.arrivalField[ignitionIndex], 0);
   // Non-burnable surroundings are unreachable and must normalize to -1.
   assert.ok([...result.arrivalField].some((value) => value === -1));
 });
 
-test('runScenario carries multi-row weather through the Jac physical contract', async () => {
-  let jacCalls = 0;
+test('runScenario carries multi-row weather through the physical contract', async () => {
+  let solveCalls = 0;
   const field = new Float32Array(64 * 64);
   const result = await runScenario({ ignition: { latitude: 37, longitude: -122 } }, {
-    propagation: 'jac-rothermel',
+    propagation: 'rothermel',
     adapters: {
       async loadContext({ totalCells }) {
         return {
@@ -287,14 +287,14 @@ test('runScenario carries multi-row weather through the Jac physical contract', 
       }
     },
     propagateRothermel: async (request) => {
-      jacCalls += 1;
+      solveCalls += 1;
       assert.equal(request.weather_minutes.length, 2);
       assert.equal(request.weather_midflame_winds_by_time.length, 2);
-      return { arrivalField: field, engine: 'jac-rothermel', fallbackReason: null };
+      return { arrivalField: field, engine: 'rothermel', fallbackReason: null };
     }
   });
-  assert.equal(jacCalls, 1);
-  assert.equal(result.simulation.engine, 'jac-rothermel');
+  assert.equal(solveCalls, 1);
+  assert.equal(result.simulation.engine, 'rothermel');
   assert.equal(result.arrivalField, field);
 });
 
@@ -403,8 +403,8 @@ test('environmental request cache reuses a location instead of refetching it', a
   assert.equal(calls, firstRunCalls);
 });
 
-test('Jac fire contract compacts fuel definitions and supplies flat terrain when unavailable', () => {
-  const request = createJacFireRequest({
+test('fire contract compacts fuel definitions and supplies flat terrain when unavailable', () => {
+  const request = createFireRequest({
     fuelCodes: ['GR1', 'GR1', 'NB', 'GR1'], gridSize: 2, cellSizeMeters: 10, ignitionIndex: 0, maxPropagationMinutes: 720,
     deadMoistureFraction: 0.08, liveMoistureFraction: 0.6,
     midflameWindKmh: 6, windDirectionRadians: 0
@@ -417,8 +417,8 @@ test('Jac fire contract compacts fuel definitions and supplies flat terrain when
   assert.equal(request.max_propagation_minutes, 720);
 });
 
-test('Jac fire contract preserves fuel-class moisture for the Rothermel kernel', () => {
-  const request = createJacFireRequest({
+test('fire contract preserves fuel-class moisture for the Rothermel kernel', () => {
+  const request = createFireRequest({
     fuelCodes: ['GR1', 'GR1', 'GR1', 'GR1'], gridSize: 2, cellSizeMeters: 10, ignitionIndex: 0, maxPropagationMinutes: 720,
     deadMoistureFraction: 0.08, liveMoistureFraction: 0.6,
     deadMoistureByClass: { '1h': 0.03, '10h': 0.06, '100h': 0.1 },
@@ -430,7 +430,7 @@ test('Jac fire contract preserves fuel-class moisture for the Rothermel kernel',
 });
 
 test('rate solver produces the arrival field and preserves unreachable cells', async () => {
-  // Was: fed a fake Jac HTTP response and asserted the JS result matched it,
+  // Was: fed a fake remote HTTP response and asserted the JS result matched it,
   // plus an offline-fallback path. There is no remote engine to cross-check
   // or fall back from now — the JS solver is the engine, so this asserts its
   // output directly.
@@ -440,11 +440,11 @@ test('rate solver produces the arrival field and preserves unreachable cells', a
     cellSizeMeters: 10,
     ignitionIndex: 0
   };
-  const expected = solveRateFieldInJavaScript(request);
+  const expected = solveRateField(request);
   assert.deepEqual([...expected], [0, 10, -1, 14.142135620117188]);
 
-  const result = await propagateWithJac(request);
-  assert.equal(result.engine, 'javascript-rate');
+  const result = await propagateRateField(request);
+  assert.equal(result.engine, 'rate');
   assert.equal(result.fallbackReason, null);
   assert.deepEqual([...result.arrivalField], [...expected]);
 });

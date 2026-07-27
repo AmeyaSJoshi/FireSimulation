@@ -2,7 +2,7 @@ import { getFuelModel } from '../lib/fuelModels.js';
 import { windToMidflame } from '../lib/weatherInputs.js';
 
 function requiredArray(name, value, length) {
-  if (!value || value.length !== length) throw new RangeError(`jacFireContract: ${name} must contain ${length} values`);
+  if (!value || value.length !== length) throw new RangeError(`fireContract: ${name} must contain ${length} values`);
   return value;
 }
 
@@ -59,7 +59,7 @@ function normalizedWeatherTimeline(weatherTimeline, models, {
     });
 }
 
-export function createJacFireRequest({
+export function createFireRequest({
   fuelCodes,
   fuelModelDefinitionsByCode = {},
   terrainHeights = null,
@@ -76,12 +76,12 @@ export function createJacFireRequest({
   midflameWindKmh = null,
   windDirectionRadians
 } = {}) {
-  if (!Number.isInteger(gridSize) || gridSize < 2) throw new RangeError('jacFireContract: gridSize must be an integer >= 2');
+  if (!Number.isInteger(gridSize) || gridSize < 2) throw new RangeError('fireContract: gridSize must be an integer >= 2');
   const totalCells = gridSize ** 2;
   requiredArray('fuelCodes', fuelCodes, totalCells);
-  if (!Number.isFinite(cellSizeMeters) || cellSizeMeters <= 0) throw new RangeError('jacFireContract: cellSizeMeters must be positive');
-  if (!Number.isInteger(ignitionIndex) || ignitionIndex < 0 || ignitionIndex >= totalCells) throw new RangeError('jacFireContract: ignitionIndex is outside the grid');
-  if (!Number.isFinite(maxPropagationMinutes) || maxPropagationMinutes <= 0) throw new RangeError('jacFireContract: maxPropagationMinutes must be positive');
+  if (!Number.isFinite(cellSizeMeters) || cellSizeMeters <= 0) throw new RangeError('fireContract: cellSizeMeters must be positive');
+  if (!Number.isInteger(ignitionIndex) || ignitionIndex < 0 || ignitionIndex >= totalCells) throw new RangeError('fireContract: ignitionIndex is outside the grid');
+  if (!Number.isFinite(maxPropagationMinutes) || maxPropagationMinutes <= 0) throw new RangeError('fireContract: maxPropagationMinutes must be positive');
   const modelIndexByCode = new Map();
   const models = [];
   const fuelModelIndices = fuelCodes.map((code) => {

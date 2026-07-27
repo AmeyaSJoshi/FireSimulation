@@ -176,7 +176,7 @@ function resultCacheKey(request, mode, likelyThreshold) {
 export function createScenarioGateway({
   adapters = undefined,
   mode = 'ensemble',
-  scenarioOptions = { propagation: 'jac-rothermel' },
+  scenarioOptions = { propagation: 'rothermel' },
   ensembleOptions = {},
   runScenarioImpl = runScenario,
   runEnsembleImpl = runScenarioEnsemble,

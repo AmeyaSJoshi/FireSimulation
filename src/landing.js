@@ -309,7 +309,7 @@ window.addEventListener(
   { passive: false }
 );
 
-// The shared landing page is the public route for the Cesium/Jac app.
+// The shared landing page is the public route for the Cesium app.
 function onTransitionComplete() {
   // A one-time launch marker lets app.html distinguish an intentional entry
   // from a reload/direct visit. The app consumes it immediately, so reloads

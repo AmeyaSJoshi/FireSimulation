@@ -123,10 +123,10 @@ const conditionPanel = document.querySelector('#condition-panel');
 const simulationPanel = document.querySelector('#simulation-panel');
 const hoverPausePanels = [conditionPanel, simulationPanel];
 const MAX_PROPAGATION_MINUTES = 120;
-const jacScenarioGateway = createScenarioGateway({
+const scenarioGateway = createScenarioGateway({
   mode: 'scenario',
   adapters: createViteScenarioAdapters(),
-  scenarioOptions: { propagation: 'jac-rothermel' }
+  scenarioOptions: { propagation: 'rothermel' }
 });
 
 // Block-scale retarget (scope change, not a mode toggle — see README §
@@ -231,7 +231,7 @@ let displayedCoordinates = null;
 // P3: fire is draped on the Cesium globe in place; no camera cut.
 const DRAPE_ON_GLOBE = true;
 
-// The interactive Cesium product is Jac-only. Legacy worker code remains in
+// The interactive Cesium product uses the scenario gateway only. Legacy worker code remains in
 // the repository for offline comparison tooling, but is deliberately not
 // instantiated by the browser entry point.
 const fireWorker = null;
@@ -323,7 +323,7 @@ let lastLandCover = null;
 let lastFuelDecision = null;
 let scenarioRecords = loadScenarioRecords();
 let activeScenarioContext = null;
-let jacRequestId = 0;
+let scenarioRequestId = 0;
 
 // The Earth texture is a visual guard for clicks and overlay masking. Model
 // water decisions go through resolveWaterEvidence so classified sources can
@@ -982,7 +982,7 @@ function handleGlobeClick(lat, lon, groundHeightMeters = 0) {
     })
     .catch(() => { /* Existing coarse location label remains the fallback. */ });
 
-  // The coarse visual water map is advisory for Cesium. The Jac landscape
+  // The coarse visual water map is advisory for Cesium. The landscape
   // adapter resolves the actual 10 m fuel field and remains authoritative.
   if (!DRAPE_ON_GLOBE && !canIgniteSurface(isOcean)) {
     resetFireSimulation();
@@ -998,11 +998,11 @@ function handleGlobeClick(lat, lon, groundHeightMeters = 0) {
     return;
   }
   if (DRAPE_ON_GLOBE && isOcean === true) {
-    console.info('[handleGlobeClick] coarse map reports water; deferring to the Jac fuel field');
+    console.info('[handleGlobeClick] coarse map reports water; deferring to the scenario fuel field');
   }
 
   // Fuel eligibility is intentionally resolved by the same scenario adapter
-  // that constructs the Jac request, not by a second click-time classifier.
+  // that constructs the fire request, not by a second click-time classifier.
   lastLandCover = null;
   lastFuelDecision = null;
   pickedCoordinates = coordinates;
@@ -1011,19 +1011,19 @@ function handleGlobeClick(lat, lon, groundHeightMeters = 0) {
   if (DRAPE_ON_GLOBE) flyToFramed({ latitude: lat, longitude: lon, groundHeightMeters });
 
   // This is the canonical backend-task path: scenarioGateway -> runScenario
-  // -> Jac Rothermel. It owns source routing, terrain/weather context,
+  // -> Rothermel solve. It owns source routing, terrain/weather context,
   // cancellation, and completed-result caching. Cesium only renders its
   // returned field; it does not perform propagation locally.
-  const requestId = ++jacRequestId;
+  const requestId = ++scenarioRequestId;
   panelStatus.dataset.mode = 'running';
-  statusText.textContent = 'Preparing Jac fire solve';
-  simulationReadout.textContent = 'Loading fuel and weather for Jac';
+  statusText.textContent = 'Preparing fire solve';
+  simulationReadout.textContent = 'Loading fuel and weather';
   pauseButton.disabled = false;
   resetButton.disabled = false;
   pauseButton.textContent = 'Pause';
   pauseButton.setAttribute('aria-label', 'Pause simulation');
   const sliderParams = getSimulationParams();
-  jacScenarioGateway.submit({
+  scenarioGateway.submit({
     ignition: { latitude: lat, longitude: lon },
     // An ignition always transitions into the local fire view. Sampling the
     // pre-flight orbital camera selected the 500 m regional rung, produced a
@@ -1039,8 +1039,8 @@ function handleGlobeClick(lat, lon, groundHeightMeters = 0) {
       horizonMinutes: MAX_PROPAGATION_MINUTES
     }
   }).then((scenario) => {
-    if (requestId !== jacRequestId) return;
-    if (scenario.simulation.engine !== 'jac-rothermel') {
+    if (requestId !== scenarioRequestId) return;
+    if (scenario.simulation.engine !== 'rothermel') {
       throw new Error(`Unexpected solver: ${scenario.simulation.engine ?? 'unknown'}`);
     }
     const result = createDrapeResultFromScenario(scenario);
@@ -1051,8 +1051,8 @@ function handleGlobeClick(lat, lon, groundHeightMeters = 0) {
     const m = result.metrics;
     const fallbacks = scenario.provenance?.fallbacks ?? [];
     simulationReadout.textContent = fallbacks.length > 0
-      ? `Jac solved · ${fallbacks.length} data-provider fallback${fallbacks.length === 1 ? '' : 's'} active`
-      : 'Jac solved · environmental data ready';
+      ? `scenario solved · ${fallbacks.length} data-provider fallback${fallbacks.length === 1 ? '' : 's'} active`
+      : 'scenario solved · environmental data ready';
     simulationNote.textContent = fallbacks.length > 0
       ? fallbacks.join(' · ')
       : (scenario.provenance?.sources ?? []).map(({ name }) => name).filter(Boolean).join(' · ');
@@ -1073,15 +1073,15 @@ function handleGlobeClick(lat, lon, groundHeightMeters = 0) {
       });
     }
   }).catch((error) => {
-    if (requestId !== jacRequestId) return;
-    console.warn('[scenarioGateway] Jac solve failed:', error);
+    if (requestId !== scenarioRequestId) return;
+    console.warn('[scenarioGateway] scenario solve failed:', error);
     fireDrape?.clear();
     timelineScrub.disabled = true;
     pauseButton.disabled = true;
     panelStatus.dataset.mode = 'blocked';
-    statusText.textContent = 'Jac fire service unavailable';
+    statusText.textContent = 'scenario fire service unavailable';
     simulationReadout.textContent = 'No local solver fallback is enabled';
-    simulationNote.textContent = error?.message ?? 'Unable to reach Jac RunFire';
+    simulationNote.textContent = error?.message ?? 'Unable to reach scenario RunFire';
   });
 }
 
@@ -1199,14 +1199,14 @@ function startDrapePlayback(result) {
     fireDrape?.setTime(0);
     panelStatus.dataset.mode = 'armed';
     statusText.textContent = formatDrapeOutcome(metrics);
-    simulationReadout.textContent = `Jac solved · ${formatDrapeOutcome(metrics)}`;
+    simulationReadout.textContent = `scenario solved · ${formatDrapeOutcome(metrics)}`;
     simulationNote.textContent = `${metrics.burnableCellCount} burnable · ${metrics.nonBurnableCellCount} non-burnable cells`;
     return;
   }
 
   panelStatus.dataset.mode = 'running';
-  statusText.textContent = 'Simulation running · Jac';
-  simulationReadout.textContent = 'Jac solved · replaying fire spread';
+  statusText.textContent = 'Simulation running · scenario';
+  simulationReadout.textContent = 'scenario solved · replaying fire spread';
 
   fireDrape?.onTime((minutes) => {
     liveModelMinutes = minutes;
@@ -1217,7 +1217,7 @@ function startDrapePlayback(result) {
     if (minutes >= endMinutes && panelStatus.dataset.mode === 'running') {
       panelStatus.dataset.mode = 'armed';
       statusText.textContent = formatDrapeOutcome(metrics);
-      simulationReadout.textContent = `Jac solved · ${formatDrapeOutcome(metrics)}`;
+      simulationReadout.textContent = `scenario solved · ${formatDrapeOutcome(metrics)}`;
       simulationNote.textContent = `${metrics.burnedCellCount}/${metrics.burnableCellCount} burnable cells reached · ${metrics.nonBurnableCellCount} non-burnable`;
     }
   });
@@ -1549,7 +1549,7 @@ function replayScenario(record) {
 
 async function startFireSimulation(coordinates) {
   // Compatibility entry point for stale callers. It cannot start the retired
-  // worker path; every ignition is redirected to the canonical Jac gateway.
+  // worker path; every ignition is redirected to the canonical scenario gateway.
   handleGlobeClick(coordinates.latitude, coordinates.longitude);
   return;
 
@@ -2051,8 +2051,8 @@ async function startFireSimulation(coordinates) {
 }
 
 function resetFireSimulation() {
-  jacRequestId += 1;
-  jacScenarioGateway.cancel();
+  scenarioRequestId += 1;
+  scenarioGateway.cancel();
   terrainRequestId += 1;
   fireRunId += 1;
   fireRunning = false;
@@ -2309,13 +2309,13 @@ pauseButton.addEventListener('click', () => {
     pauseButton.textContent = 'Resume';
     pauseButton.setAttribute('aria-label', 'Resume simulation');
     panelStatus.dataset.mode = 'armed';
-    statusText.textContent = 'Jac playback paused';
+    statusText.textContent = 'scenario playback paused';
   } else {
     fireDrape.play();
     pauseButton.textContent = 'Pause';
     pauseButton.setAttribute('aria-label', 'Pause simulation');
     panelStatus.dataset.mode = 'running';
-    statusText.textContent = 'Simulation running · Jac';
+    statusText.textContent = 'Simulation running · scenario';
   }
 });
 resetButton.addEventListener('click', resetFireSimulation);

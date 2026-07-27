@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { runJacFire, DEFAULT_JAC_ENDPOINT } from './jacClient.js';
-import { createJacFireRequest } from './jacFireContract.js';
+import { runFire, FIRE_ENGINE_ID } from './fireClient.js';
+import { createFireRequest } from './fireContract.js';
 
 // These previously asserted HTTP transport details (POST body, endpoint URL,
 // HTTP 503 surfacing). The solve now runs in-process, so what matters is that
@@ -9,7 +9,7 @@ import { createJacFireRequest } from './jacFireContract.js';
 // field — not how it travelled.
 
 function buildRequest(gridSize = 8, overrides = {}) {
-  return createJacFireRequest({
+  return createFireRequest({
     fuelCodes: Array(gridSize ** 2).fill('GR2'),
     gridSize,
     cellSizeMeters: 10,
@@ -23,23 +23,23 @@ function buildRequest(gridSize = 8, overrides = {}) {
   });
 }
 
-test('runJacFire solves locally and returns one arrival per cell', async () => {
+test('runFire solves locally and returns one arrival per cell', async () => {
   const request = buildRequest(8);
-  const result = await runJacFire(request);
+  const result = await runFire(request);
 
-  assert.equal(result.endpoint, DEFAULT_JAC_ENDPOINT);
+  assert.equal(result.endpoint, FIRE_ENGINE_ID);
   assert.equal(result.arrivalMinutes.length, request.grid_size ** 2);
   assert.equal(result.arrivalMinutes[request.ignition_index], 0);
   const reached = [...result.arrivalMinutes].filter((value) => Number.isFinite(value)).length;
   assert.ok(reached > 1, `expected spread beyond ignition, reached ${reached}`);
 });
 
-test('runJacFire marks unreachable cells as Infinity, never negative', async () => {
+test('runFire marks unreachable cells as Infinity, never negative', async () => {
   const gridSize = 6;
   const fuelCodes = Array(gridSize ** 2).fill('NB');
   const ignitionIndex = 14;
   fuelCodes[ignitionIndex] = 'GR2';
-  const result = await runJacFire(buildRequest(gridSize, { fuelCodes, ignitionIndex }));
+  const result = await runFire(buildRequest(gridSize, { fuelCodes, ignitionIndex }));
 
   assert.equal(result.arrivalMinutes[ignitionIndex], 0);
   for (const value of result.arrivalMinutes) {
@@ -47,8 +47,8 @@ test('runJacFire marks unreachable cells as Infinity, never negative', async () 
   }
 });
 
-test('runJacFire rejects when the solve is aborted', async () => {
+test('runFire rejects when the solve is aborted', async () => {
   const controller = new AbortController();
   controller.abort();
-  await assert.rejects(runJacFire(buildRequest(4), { signal: controller.signal }), /aborted/i);
+  await assert.rejects(runFire(buildRequest(4), { signal: controller.signal }), /aborted/i);
 });

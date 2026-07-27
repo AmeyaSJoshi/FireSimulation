@@ -6,8 +6,8 @@ import { resolutionForAltitude } from './resolutionLadder.js';
 import { activeFireCells } from './scenarioContours.js';
 import { createFallbackScenarioAdapters } from './scenarioAdapters.js';
 import { createRateField } from './rateField.js';
-import { propagateRothermelWithJac, propagateWithJac } from './jacPropagation.js';
-import { createJacFireRequest } from './jacFireContract.js';
+import { propagateRothermel as defaultPropagateRothermel, propagateRateField } from './propagation.js';
+import { createFireRequest } from './fireContract.js';
 
 const DEFAULT_OVERRIDES = Object.freeze({
   windSpeedKmh: 18,
@@ -70,15 +70,15 @@ export async function runScenario(request, {
   adapters = createFallbackScenarioAdapters(),
   signal = undefined,
   propagation = 'physical',
-  propagate = propagateWithJac,
-  propagateRothermel = propagateRothermelWithJac
+  propagate = propagateRateField,
+  propagateRothermel = defaultPropagateRothermel
 } = {}) {
   if (!adapters || typeof adapters.loadContext !== 'function') {
     throw new TypeError('runScenario: adapters.loadContext must be a function');
   }
   const normalized = normalizeRequest(request);
-  if (!['physical', 'jac', 'jac-rothermel'].includes(propagation)) {
-    throw new RangeError('runScenario: propagation must be physical, jac, or jac-rothermel');
+  if (!['physical', 'rate', 'rothermel'].includes(propagation)) {
+    throw new RangeError('runScenario: propagation must be physical, rate, or rothermel');
   }
   const resolution = resolutionForAltitude(normalized.altitudeMeters);
   const grid = createSpatialGrid({
@@ -150,7 +150,7 @@ export async function runScenario(request, {
       maxPropagationMinutes: conditions.horizonMinutes
     });
     arrivalField = serializeArrivalTimes(simulation.arrivalTimes);
-  } else if (propagation === 'jac') {
+  } else if (propagation === 'rate') {
     rateField = createRateField({
       fuelCodes: context.fuelCodes,
       fuelModelDefinitionsByCode: context.fuelModelDefinitionsByCode,
@@ -170,8 +170,8 @@ export async function runScenario(request, {
     arrivalField = result.arrivalField;
     engine = result.engine;
     fallbackReason = result.fallbackReason ?? null;
-  } else if (propagation === 'jac-rothermel') {
-    const result = await propagateRothermel(createJacFireRequest({
+  } else if (propagation === 'rothermel') {
+    const result = await propagateRothermel(createFireRequest({
       fuelCodes: context.fuelCodes,
       fuelModelDefinitionsByCode: context.fuelModelDefinitionsByCode,
       terrainHeights: context.terrainHeights,

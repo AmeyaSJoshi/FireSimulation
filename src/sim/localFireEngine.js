@@ -1,9 +1,9 @@
 import { calculateSurfaceSpread } from '../lib/surfaceSpread.js';
 import { ellipseRateFromHeadBacking } from '../lib/fireEllipse.js';
 
-// In-browser replacement for the Jac RunFire walker.
+// The fire engine. Solves an arrival-time field in-process.
 //
-// Consumes the *same* snake_case request createJacFireRequest() already
+// Consumes the *same* snake_case request createFireRequest() already
 // builds, and returns the same arrivalMinutes field, so every call site,
 // contract test, and renderer stays untouched. The only thing that changes is
 // that the solve happens here instead of over HTTP to a service that has to
@@ -135,9 +135,9 @@ function slopeAt(heights, gridSize, cellSizeMeters, row, col) {
 }
 
 /**
- * Solve the arrival-time field for a Jac RunFire request, locally.
+ * Solve the arrival-time field for a fire request.
  * Returns { arrivalMinutes: Float32Array } with Infinity for unreached cells,
- * matching what runJacFire produced from the service.
+ * one entry per cell.
  */
 export function solveFireRequest(request) {
   const gridSize = request.grid_size;

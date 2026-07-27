@@ -1,19 +1,19 @@
-import { runJacFire } from './jacClient.js';
+import { runFire } from './fireClient.js';
 
 const SQRT2 = 1.41421356237;
 
 function assertRequest({ rates, gridSize, cellSizeMeters, ignitionIndex }) {
   if (!rates || rates.length !== gridSize * gridSize) {
-    throw new RangeError('jacPropagation: rates length must equal gridSize squared');
+    throw new RangeError('propagation: rates length must equal gridSize squared');
   }
   if (!Number.isInteger(gridSize) || gridSize < 2) {
-    throw new RangeError('jacPropagation: gridSize must be an integer >= 2');
+    throw new RangeError('propagation: gridSize must be an integer >= 2');
   }
   if (!Number.isFinite(cellSizeMeters) || cellSizeMeters <= 0) {
-    throw new RangeError('jacPropagation: cellSizeMeters must be positive');
+    throw new RangeError('propagation: cellSizeMeters must be positive');
   }
   if (!Number.isInteger(ignitionIndex) || ignitionIndex < 0 || ignitionIndex >= rates.length) {
-    throw new RangeError('jacPropagation: ignitionIndex is outside the field');
+    throw new RangeError('propagation: ignitionIndex is outside the field');
   }
 }
 
@@ -47,11 +47,11 @@ function pop(heap) {
   return first;
 }
 
-export function solveRateFieldInJavaScript(request) {
+export function solveRateField(request) {
   assertRequest(request);
   const { rates, gridSize, cellSizeMeters, ignitionIndex } = request;
-  // Keep Dijkstra's working distances at full precision; the Jac runtime does
-  // the same, then both engines compact the completed field to Float32.
+  // Keep Dijkstra's working distances at full precision, then compact the
+  // completed field to Float32.
   const arrivals = Array(rates.length).fill(-1);
   arrivals[ignitionIndex] = 0;
   const queue = [[0, ignitionIndex]];
@@ -81,25 +81,25 @@ export function solveRateFieldInJavaScript(request) {
   return Float32Array.from(arrivals);
 }
 
-// Previously raced a Jac /walker/Propagate call against the JS solver and
-// cross-checked them. With the service gone, the JS solver above IS the
-// engine — it was already the reference the remote result had to match.
-export async function propagateWithJac(request) {
+// Previously raced a remote propagate call against this solver and
+// cross-checked them. The solver above IS the engine now — it was already
+// the reference the remote result had to match.
+export async function propagateRateField(request) {
   return {
-    arrivalField: solveRateFieldInJavaScript(request),
-    engine: 'javascript-rate',
+    arrivalField: solveRateField(request),
+    engine: 'rate',
     fallbackReason: null
   };
 }
 
-export async function propagateRothermelWithJac(request, { signal = undefined } = {}) {
+export async function propagateRothermel(request, { signal = undefined } = {}) {
   // The sole production RunFire path. Keeping this adapter tiny lets
   // runScenario retain its renderer-neutral result contract while every
   // caller shares identical validation and failure behaviour.
-  const result = await runJacFire(request, { signal });
+  const result = await runFire(request, { signal });
   return {
     arrivalField: Float32Array.from(result.arrivalMinutes, (arrival) => Number.isFinite(arrival) ? arrival : -1),
-    engine: 'javascript-rothermel',
+    engine: 'rothermel',
     fallbackReason: null
   };
 }

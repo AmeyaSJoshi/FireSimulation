@@ -23,7 +23,7 @@ import { createFireOverlay, VISUAL_CELL_SCALE } from './fireOverlay.js';
 // every capped-out cell vanish as the camera moves. Layering instead gives a
 // ground glow under the volume and guarantees no live cell disappears.
 //
-// Reads only the Jac scenario result contract (arrivalMinutes / fuelCodes /
+// Reads only the scenario result contract (arrivalMinutes / fuelCodes /
 // bbox / gridSize). No physics, no sim data touched.
 // PFIX5: raised from 250 so the demo reaches volumetric flames without
 // diving to near-ground altitude first.

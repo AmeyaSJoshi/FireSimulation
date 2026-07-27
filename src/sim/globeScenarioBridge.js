@@ -80,7 +80,7 @@ export function fireOverlayFrame(scenario, atMinutes, { frontWindowMinutes = 1.5
 
 export function createGlobeScenarioController({
   runScenarioImpl = runScenario,
-  scenarioOptions = { propagation: 'jac-rothermel' }
+  scenarioOptions = { propagation: 'rothermel' }
 } = {}) {
   if (typeof runScenarioImpl !== 'function') {
     throw new TypeError('globeScenarioBridge: runScenarioImpl must be a function');

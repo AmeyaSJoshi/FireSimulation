@@ -47,7 +47,7 @@ export function ensembleCacheKey(request, { likelyThreshold, propagation } = {})
     moistureFraction: overrides.moistureFraction ?? null,
     horizonMinutes: overrides.horizonMinutes ?? null,
     likelyThreshold,
-    propagation: propagation ?? 'jac-rothermel'
+    propagation: propagation ?? 'rothermel'
   });
 }
 
@@ -173,7 +173,7 @@ async function buildScenarioEnsemble(request, { adapters, runScenarioImpl, scena
 export async function runScenarioEnsemble(request, {
   adapters = DEFAULT_ADAPTERS,
   runScenarioImpl = runScenario,
-  scenarioOptions = { propagation: 'jac-rothermel' },
+  scenarioOptions = { propagation: 'rothermel' },
   likelyThreshold = 0.5,
   cache = true,
   cacheTtlMs = DEFAULT_ENSEMBLE_CACHE_TTL_MS,
