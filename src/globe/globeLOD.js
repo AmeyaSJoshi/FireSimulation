@@ -16,7 +16,7 @@ import * as Cesium from 'cesium';
 export const FAR_ALTITUDE_M = 60_000;
 const THROTTLE_MS = 120;
 
-export function initGlobeLOD(viewer, tilesetPromise) {
+export function initGlobeLOD(viewer, tilesetPromise, getViewMode = () => '3d') {
   let tileset = null;
   let mode = null;
   let lastCheck = 0;
@@ -69,6 +69,15 @@ export function initGlobeLOD(viewer, tilesetPromise) {
     const now = performance.now();
     if (now - lastCheck < THROTTLE_MS) return;
     lastCheck = now;
+    // 2D is explicit and unconditional: terrain+imagery only, never gated by
+    // altitude. The altitude threshold below is a 3D-only optimisation — at
+    // extreme zoom-out the photoreal tileset LOD thins to grey mush, so 3D
+    // still swaps to the terrain globe up there, but 2D never had tiles on
+    // to begin with.
+    if (getViewMode() === '2d') {
+      apply('far');
+      return;
+    }
     apply(viewer.camera.positionCartographic.height > FAR_ALTITUDE_M ? 'far' : 'near');
   }
 

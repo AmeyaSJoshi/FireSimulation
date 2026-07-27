@@ -169,7 +169,11 @@ scale** — see *Known limitations*. This is a scope change, not a mode: the
 regional benchmark path (`hackathonBenchmarkRunner.js`, `validate-*.mjs`,
 `officialBenchmarkFixtures.js`) uses its own grid config and is untouched.
 
-### Frontend ↔ worker contract (`src/workers/fireWorker.js`)
+### Legacy worker contract (`src/workers/fireWorker.js`)
+
+This worker is retained only for offline comparison and historical validation.
+The Cesium app does not instantiate it and never uses it for an ignition; see
+[`src/sim/README.md`](src/sim/README.md) for the Jac-only production path.
 
 A new frontend talking to this worker must match:
 

@@ -1,0 +1,264 @@
+:root {
+  --ash: #12110F;
+  --slate: #2A2724;
+  --bone: #E8E3D9;
+  --bone-mid: #A9A296;
+  --bone-low: #6B655C;
+
+  --sodium: #F0A63C;
+  --sodium-hot: #FFD08A;
+  --oxblood: #7A2318;
+
+  --ui-sans: 'Bricolage Grotesque', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --ui-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100dvh;
+  overflow: hidden;
+  overscroll-behavior: none;
+  touch-action: none;
+  background: var(--ash);
+  color: var(--bone);
+  font-family: var(--ui-sans);
+}
+
+/* ---------- Background image ----------
+   #bg-frame overscans the viewport by 4% on every edge so the scroll
+   push-in scale always has unrendered margin to draw from - without that
+   margin, scaling a box exactly at the viewport edge reveals a soft seam
+   right at the boundary.
+   The photo is a real 1920px-wide source (3.3x the old placeholder), so the
+   treatment leans on color grading + vignette + grain rather than blur -
+   the tree silhouettes and fire structure are sharp and meant to read. */
+
+#bg-frame {
+  position: fixed;
+  inset: -4%;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+#bg-photo {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: 50% 53%;
+  filter: brightness(0.9) contrast(1.08) saturate(1.08);
+  transform: scale(1);
+  transform-origin: center;
+  will-change: transform;
+}
+
+#bg-glow {
+  position: absolute;
+  inset: 0;
+  /* A restrained bloom around the planet's fire rim. */
+  background: radial-gradient(
+    ellipse 42% 28% at 50% 57%,
+    rgba(255, 208, 138, 0.3) 0%,
+    rgba(240, 92, 38, 0.16) 48%,
+    transparent 75%
+  );
+  opacity: 0.18;
+  mix-blend-mode: screen;
+  will-change: opacity;
+}
+
+#bg-vignette {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    ellipse 92% 86% at 50% 48%,
+    transparent 54%,
+    rgba(8, 6, 5, 0.18) 78%,
+    rgba(4, 3, 3, 0.62) 100%
+  );
+}
+
+#bg-grain {
+  position: absolute;
+  inset: 0;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='140' height='140'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix type='matrix' values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.6 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+  background-size: 140px 140px;
+  mix-blend-mode: overlay;
+  opacity: 0.05;
+}
+
+/* ---------- Foreground (text + scroll affordance) ----------
+   Both live in one flex column spanning the viewport so they can never
+   overlap regardless of how tall the text block gets at a given width -
+   #scroll-affordance is pushed to the bottom via margin-top:auto rather
+   than being independently bottom-anchored. */
+
+#foreground {
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+#landing-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 0 1.25rem 0;
+  will-change: transform, opacity;
+}
+
+/* #text-block wraps only the wordmark - NOT the 32vh of
+   empty top padding that used to live on #landing-content. That padding is
+   what broke the previous scrim: positioning it on #landing-content meant
+   the localized scrim's box (and its center) was computed against a box
+   that was mostly empty space above the wordmark, so the ellipse's dense
+   middle sat far too high and the descriptor - close to the real box's
+   bottom edge - fell into the fading outer ring, right where the photo's
+   brightest fire pixels are. Anchoring margin-top here instead means
+   #text-block's own bounding box is exactly the visible text, so the scrim
+   below is centered on the text that's actually on screen. */
+#text-block {
+  position: relative;
+  margin-top: 32vh;
+}
+
+#text-block::before {
+  content: '';
+  position: absolute;
+  /* Feathered margin around the tight text box, not the viewport - this is
+     the point of the localized approach: it guarantees AA behind the words
+     without darkening the photo anywhere else. Grows automatically with
+     the content (e.g. the descriptor wrapping to two lines on narrow
+     screens) since the offsets are relative to #text-block's own box. */
+  top: -7vh;
+  right: -14vw;
+  bottom: -7vh;
+  left: -14vw;
+  z-index: -1;
+  background: radial-gradient(
+    ellipse 90% 94% at 50% 50%,
+    rgba(9, 8, 7, 0.78) 0%,
+    rgba(9, 8, 7, 0.72) 50%,
+    rgba(9, 8, 7, 0.6) 72%,
+    rgba(9, 8, 7, 0.3) 86%,
+    rgba(9, 8, 7, 0.08) 95%,
+    rgba(9, 8, 7, 0) 100%
+  );
+  pointer-events: none;
+}
+
+#wordmark-wrap {
+  position: relative;
+  display: inline-block;
+}
+
+#wordmark {
+  margin: 0;
+  display: block;
+  white-space: nowrap;
+  font-family: var(--ui-sans);
+  font-optical-sizing: auto;
+  font-weight: 700;
+  line-height: 0.9;
+  letter-spacing: -0.02em;
+  /* AETHON is six letters against ISOCHRONE's nine, so the ramp runs
+     noticeably larger at every breakpoint while still fitting at 375px
+     (verified by screenshot, not just this comment). */
+  font-size: clamp(5.5rem, 17vw, 17.5rem);
+  color: var(--bone);
+}
+
+/* The real heading stays in the DOM (screen readers, text selection, no-JS
+   and reduced-motion fallback) but goes invisible-in-place once the canvas
+   takes over - color: transparent rather than display/visibility so it
+   never leaves the accessibility tree or drops out of layout. */
+#wordmark-wrap.particles-active #wordmark {
+  color: transparent;
+}
+
+#wordmark-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: none;
+  pointer-events: none;
+}
+
+#wordmark-wrap.particles-active #wordmark-canvas {
+  display: block;
+}
+
+/* ---------- Scroll affordance ---------- */
+
+#scroll-affordance {
+  margin-top: auto;
+  margin-bottom: clamp(2.5rem, 6vh, 4.5rem);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  pointer-events: none;
+}
+
+#scroll-label {
+  font-family: var(--ui-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--bone);
+  text-shadow: 0 1px 12px rgba(0, 0, 0, 0.9);
+}
+
+#scroll-indicator {
+  position: relative;
+  width: 22px;
+  height: 34px;
+  border: 1px solid rgba(232, 227, 217, 0.55);
+  border-radius: 12px;
+  opacity: 0.9;
+  overflow: hidden;
+}
+
+#scroll-indicator::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 6px;
+  width: 3px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--sodium-hot);
+  box-shadow: 0 0 8px rgba(240, 166, 60, 0.7);
+  transform: translateX(-50%);
+  animation: scroll-drip 1.9s ease-in-out infinite;
+}
+
+@keyframes scroll-drip {
+  0% { top: 6px; opacity: 0; }
+  15% { opacity: 1; }
+  80% { opacity: 1; }
+  100% { top: 20px; opacity: 0; }
+}
+
+/* ---------- Reduced motion ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+  #scroll-indicator::after {
+    animation: none !important;
+  }
+}
+

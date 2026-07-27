@@ -1,5 +1,5 @@
 import * as Cesium from 'cesium';
-import { createFireOverlay } from './fireOverlay.js';
+import { createFireOverlay, VISUAL_CELL_SCALE } from './fireOverlay.js';
 
 // Altitude-gated fire detail.
 //
@@ -23,19 +23,19 @@ import { createFireOverlay } from './fireOverlay.js';
 // every capped-out cell vanish as the camera moves. Layering instead gives a
 // ground glow under the volume and guarantees no live cell disappears.
 //
-// Reads only the frozen runFromClick() contract (arrivalMinutes / fuelCodes /
+// Reads only the Jac scenario result contract (arrivalMinutes / fuelCodes /
 // bbox / gridSize). No physics, no sim data touched.
-export const CLOSE_ALTITUDE_M = 250;
+// PFIX5: raised from 250 so the demo reaches volumetric flames without
+// diving to near-ground altitude first.
+export const CLOSE_ALTITUDE_M = 1_800;
 
 const MAX_VOLUMETRIC_CELLS = 48;
-const RENDER_DISTANCE_M = 900;
+const RENDER_DISTANCE_M = CLOSE_ALTITUDE_M;
 const UPDATE_THROTTLE_MS = 140;
 // Matches fireOverlay's active-front window: only the leading edge gets
 // volume, smouldering cells stay as the base layer's dim points.
-const FRONT_WINDOW_MINUTES = 90 / 60;
+const FRONT_WINDOW_MINUTES = 8;
 const FLAME_LIFT_METERS = 3;
-const CELL_BOUNDING_RADIUS_M = 12;
-
 function flameScaleForFuel(fuelIndex) {
   if (fuelIndex >= 18) return 2.2;  // TU*/TL* timber
   if (fuelIndex >= 10) return 1.5;  // SH* brush
@@ -65,12 +65,14 @@ export function createFireLOD(viewer) {
   let cellPositions = null;
   let timeMinutes = 0;
   let pool = [];
+  let billboardPool = null;
   let removeListener = null;
   let lastUpdate = 0;
   let dirty = false;
 
   function ensurePool() {
     if (pool.length > 0) return;
+    billboardPool = viewer.scene.primitives.add(new Cesium.BillboardCollection({ scene: viewer.scene }));
     for (let i = 0; i < MAX_VOLUMETRIC_CELLS; i += 1) {
       const system = new Cesium.ParticleSystem({
         image: particleImage,
@@ -82,7 +84,7 @@ export function createFireLOD(viewer) {
         maximumParticleLife: 1.4,
         minimumSpeed: 3.0,
         maximumSpeed: 8.0,
-        imageSize: new Cesium.Cartesian2(2.0, 2.0),
+        imageSize: new Cesium.Cartesian2(2.0 * VISUAL_CELL_SCALE, 2.0 * VISUAL_CELL_SCALE),
         emissionRate: 24,
         // Metres, not pixels — flames must keep physical size as you approach.
         sizeInMeters: true,
@@ -92,12 +94,21 @@ export function createFireLOD(viewer) {
       });
       viewer.scene.primitives.add(system);
       pool.push(system);
+      billboardPool.add({
+        image: particleImage,
+        show: false,
+        verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+        disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        scaleByDistance: new Cesium.NearFarScalar(0, 1.4, 2_500, 0.55)
+      });
     }
   }
 
   function destroyPool() {
     for (const system of pool) viewer.scene.primitives.remove(system);
     pool = [];
+    if (billboardPool) viewer.scene.primitives.remove(billboardPool);
+    billboardPool = null;
   }
 
   // Same cell-centre derivation and single-sample surface lift P4 uses. Kept
@@ -106,14 +117,8 @@ export function createFireLOD(viewer) {
     const { gridSize, bbox } = result;
     const [west, south, east, north] = bbox;
     const positions = new Array(gridSize * gridSize);
-    let lift = FLAME_LIFT_METERS;
-    if (typeof viewer.scene.sampleHeight === 'function') {
-      try {
-        const centre = Cesium.Cartographic.fromDegrees((west + east) / 2, (south + north) / 2);
-        const surface = viewer.scene.sampleHeight(centre);
-        if (Number.isFinite(surface)) lift = surface + FLAME_LIFT_METERS;
-      } catch { /* no pickable surface; ellipsoid height is the best available */ }
-    }
+    const lift = (Number.isFinite(result.groundHeightMeters) ? result.groundHeightMeters : 0)
+      + FLAME_LIFT_METERS;
     for (let row = 0; row < gridSize; row += 1) {
       const lat = north - ((row + 0.5) / gridSize) * (north - south);
       for (let col = 0; col < gridSize; col += 1) {
@@ -125,24 +130,28 @@ export function createFireLOD(viewer) {
   }
 
   function hideAll(fromIndex = 0) {
-    for (let i = fromIndex; i < pool.length; i += 1) pool[i].show = false;
+    for (let i = fromIndex; i < pool.length; i += 1) {
+      pool[i].show = false;
+      if (billboardPool) billboardPool.get(i).show = false;
+    }
   }
 
   function updateVolumetric() {
     if (!result || !cellPositions) return;
 
-    if (viewer.camera.positionCartographic.height > CLOSE_ALTITUDE_M) {
+    // Cartographic height is height above the ellipsoid, not height above the
+    // local surface. In mountains it can be > 1 km while the camera is only a
+    // few hundred metres from the fire, so gating on it hid every flame. Use
+    // physical range to the simulated field instead.
+    const centreCell = Math.floor(result.gridSize / 2);
+    const fieldCentre = cellPositions[centreCell * result.gridSize + centreCell];
+    if (Cesium.Cartesian3.distance(viewer.camera.position, fieldCentre) > CLOSE_ALTITUDE_M) {
       if (pool.length > 0) hideAll();
       return;
     }
     ensurePool();
 
     const camera = viewer.camera;
-    const cullingVolume = camera.frustum.computeCullingVolume(
-      camera.position,
-      camera.direction,
-      camera.up
-    );
     const { arrivalMinutes, fuelCodes } = result;
 
     // Nearest-first so the cap spends its budget on the flames the camera is
@@ -158,9 +167,6 @@ export function createFireLOD(viewer) {
       const distance = Cesium.Cartesian3.distance(camera.position, position);
       if (distance > RENDER_DISTANCE_M) continue;
 
-      const sphere = new Cesium.BoundingSphere(position, CELL_BOUNDING_RADIUS_M);
-      if (cullingVolume.computeVisibility(sphere) === Cesium.Intersect.OUTSIDE) continue;
-
       candidates.push({ index: i, distance, heat: 1 - age / FRONT_WINDOW_MINUTES });
     }
     candidates.sort((a, b) => a.distance - b.distance);
@@ -171,11 +177,17 @@ export function createFireLOD(viewer) {
       const system = pool[slot];
       const scale = flameScaleForFuel(fuelCodes[index]);
       system.modelMatrix = Cesium.Transforms.eastNorthUpToFixedFrame(cellPositions[index]);
-      system.imageSize = new Cesium.Cartesian2(1.4 * scale, 1.4 * scale);
+      system.imageSize = new Cesium.Cartesian2(4 * scale * VISUAL_CELL_SCALE, 4 * scale * VISUAL_CELL_SCALE);
       system.emissionRate = 14 + 22 * heat * scale;
       system.maximumSpeed = 5.0 + 5.0 * scale;
       system.minimumSpeed = 2.5 * scale;
       system.show = true;
+      const billboard = billboardPool.get(slot);
+      billboard.position = cellPositions[index];
+      billboard.width = 18 + 8 * scale;
+      billboard.height = 38 + 18 * scale;
+      billboard.color = Cesium.Color.fromBytes(255, Math.round(150 + 55 * heat), 45, 235);
+      billboard.show = true;
     }
     hideAll(used);
   }
@@ -225,6 +237,11 @@ export function createFireLOD(viewer) {
         dirty = true;
         cb?.(minutes);
       });
+    },
+
+    // PFIX7b dev diagnostic passthrough — see fireOverlay.js.
+    setDebugCells(enabled) {
+      base.setDebugCells(enabled);
     },
 
     clear() {

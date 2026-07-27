@@ -5,6 +5,7 @@ import {
   calculateCanopyShelteredWindAdjustment,
   calculateUnshelteredWindAdjustment,
   fetchWeatherInputs,
+  fetchCurrentWind,
   windToMidflame,
   compassToMathRadians,
   isWeatherStale
@@ -276,8 +277,8 @@ test('fetchWeatherInputs: requests hourly weather history for dead-fuel estimati
     }
   });
   assert.match(requestedUrl, /hourly=/);
-  assert.match(requestedUrl, /past_days=35/);
-  assert.match(requestedUrl, /forecast_days=3/);
+  assert.match(requestedUrl, /past_days=7/);
+  assert.match(requestedUrl, /forecast_days=1/);
 });
 
 test('fetchWeatherInputs: preserves the full 72-hour forecast for time-varying wind', async () => {
@@ -331,6 +332,27 @@ test('fetchWeatherInputs: carries fuel-bed WAF provenance into current and forec
   assert.ok(result.windTimeline.every((entry) => entry.midflameWindKmh < 24 * 0.4));
 });
 
+test('fetchCurrentWind: requests only the current 10 m wind fields', async () => {
+  let requestedUrl = '';
+  const result = await fetchCurrentWind({
+    latitude: 40,
+    longitude: -100,
+    fetchImpl: async (url) => {
+      requestedUrl = url;
+      return {
+        ok: true,
+        json: async () => ({ current: {
+          time: '2026-07-26T12:00', wind_speed_10m: 24, wind_direction_10m: 210, wind_gusts_10m: 32
+        } })
+      };
+    }
+  });
+  assert.match(requestedUrl, /current=wind_speed_10m%2Cwind_direction_10m%2Cwind_gusts_10m/);
+  assert.doesNotMatch(requestedUrl, /hourly=|past_days=|forecast_days=/);
+  assert.equal(result.tenMeterSpeedKmh, 24);
+  assert.equal(result.compassDirectionDeg, 210);
+});
+
 test('fetchWeatherInputs: throws when the upstream response is not ok', async () => {
   await assert.rejects(
     fetchWeatherInputs({
@@ -339,6 +361,23 @@ test('fetchWeatherInputs: throws when the upstream response is not ok', async ()
     }),
     /weather/i
   );
+});
+
+test('fetchWeatherInputs: retries one transient rate limit', async () => {
+  let calls = 0;
+  const result = await fetchWeatherInputs({
+    latitude: 40,
+    longitude: -100,
+    rateLimitRetryDelayMs: 0,
+    fetchImpl: async () => {
+      calls += 1;
+      return calls === 1
+        ? { ok: false, status: 429 }
+        : { ok: true, status: 200, json: async () => fakeOpenMeteoResponse() };
+    }
+  });
+  assert.equal(calls, 2);
+  assert.equal(result.wind.tenMeterSpeedKmh, 24);
 });
 
 test('fetchWeatherInputs: rejects a response with missing current-block fields', async () => {

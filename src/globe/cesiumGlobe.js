@@ -1,6 +1,6 @@
 import * as Cesium from 'cesium';
 import 'cesium/Build/Cesium/Widgets/widgets.css';
-import { addGooglePhotorealisticTiles, hasPhotorealisticTilesKey, MINIMAL_VIEWER_CHROME, flyToAerial } from './googleTiles.js';
+import { addGooglePhotorealisticTiles, hasPhotorealisticTilesKey, MINIMAL_VIEWER_CHROME, flyToAerial, flyToTopDown } from './googleTiles.js';
 
 const ION_TOKEN = import.meta.env.VITE_CESIUM_ION_TOKEN;
 const hasIonToken = typeof ION_TOKEN === 'string' && ION_TOKEN.trim().length > 0;
@@ -103,30 +103,37 @@ export function initCesiumGlobe() {
 
     const carto = Cesium.Cartographic.fromCartesian(cartesian);
 
-    // Sanity-check the pick against the actual rendered surface height at
-    // that lon/lat. A stale/edge depth-buffer sample can return a cartesian
-    // whose height doesn't match what's actually there; catch it rather than
-    // ignite on a coordinate that's confidently wrong.
+    let sampledHeight = null;
+    // Diagnostic only — building sides/slopes legitimately disagree with a
+    // single sampleHeight() call at the same lon/lat, so this used to refuse
+    // real clicks. Log and proceed; never blocks the pick.
     if (typeof viewer.scene.sampleHeight === 'function') {
-      let sampledHeight = null;
       try {
         sampledHeight = viewer.scene.sampleHeight(carto);
+        if (Number.isFinite(sampledHeight) && Math.abs(sampledHeight - carto.height) > 50) {
+          console.info('[cesiumGlobe] picked height', carto.height.toFixed(1),
+            'm vs sampled', sampledHeight.toFixed(1), 'm (diagnostic only, not blocking) · strategy:', strategy);
+        }
       } catch {
-        sampledHeight = null; // no pickable surface at this pixel; skip the check
-      }
-      if (Number.isFinite(sampledHeight) && Math.abs(sampledHeight - carto.height) > 50) {
-        console.warn('[cesiumGlobe] click refused — picked height', carto.height.toFixed(1),
-          'm disagrees with sampled surface height', sampledHeight.toFixed(1),
-          'm by more than 50 m · strategy:', strategy, '·', TILES_LOADING_MESSAGE);
-        pickRefusedCallback?.(TILES_LOADING_MESSAGE);
-        return;
+        // no pickable surface at this pixel for sampleHeight; nothing to log
       }
     }
+
+    // Low-detail Google tile depth can report a point far inside the WGS84
+    // ellipsoid when clicking from orbit. Passing that negative height into
+    // the close-up flight put the camera and flames underground. Prefer a
+    // plausible picked/sample height and use a safe continental estimate
+    // until the Jac terrain field supplies the exact local elevation.
+    const plausible = (value) => Number.isFinite(value) && value >= -500 && value <= 9_000;
+    const groundHeightMeters = plausible(carto.height)
+      ? carto.height
+      : (plausible(sampledHeight) ? sampledHeight : 1_500);
 
     console.info('[cesiumGlobe] click pick strategy:', strategy);
     clickCallback?.({
       lat: Cesium.Math.toDegrees(carto.latitude),
       lon: Cesium.Math.toDegrees(carto.longitude),
+      groundHeightMeters,
       cameraAltitudeMeters: viewer.camera.positionCartographic.height
     });
   }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
@@ -135,6 +142,7 @@ export function initCesiumGlobe() {
     viewer,
     tilesetPromise,
     flyToAerial: (opts) => flyToAerial(viewer, opts),
+    flyToTopDown: (opts) => flyToTopDown(viewer, opts),
     onGlobeClick(cb) {
       clickCallback = cb;
     },

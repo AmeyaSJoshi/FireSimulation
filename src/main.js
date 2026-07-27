@@ -48,9 +48,12 @@ import { classifyScenarioEvidence, formatScenarioEvidence } from './lib/scenario
 import { BUILT_UP_CLASS_CODE, fetchUrbanFootprintsForBbox } from './lib/urbanFootprints.js';
 import { buildFuelColorField, createBlockScene } from './renderers/blockScene.js';
 import { initCesiumGlobe } from './globe/cesiumGlobe.js';
-import { MAX_PROPAGATION_MINUTES, runFromClick } from './sim/runFromClick.js';
+import { createScenarioGateway } from './sim/scenarioGateway.js';
+import { createViteScenarioAdapters } from './sim/scenarioAdapters.js';
 import { createFireLOD } from './globe/fireLOD.js';
+import { VISUAL_CELL_SCALE } from './globe/fireOverlay.js';
 import { initGlobeLOD } from './globe/globeLOD.js';
+import { initViewMode } from './globe/viewMode.js';
 import './styles.css';
 
 // ─────────────────────────────────────────────────────────────
@@ -58,6 +61,8 @@ import './styles.css';
 // ─────────────────────────────────────────────────────────────
 const canvas = document.querySelector('#scene');
 const loadingEl = document.querySelector('#loading');
+const viewModeToggle = document.querySelector('#view-mode-toggle');
+const viewModeToggleLabel = document.querySelector('#view-mode-toggle-label');
 const locationValue = document.querySelector('#location-value');
 const latitudeValue = document.querySelector('#latitude-value');
 const longitudeValue = document.querySelector('#longitude-value');
@@ -116,6 +121,12 @@ const rangeInputs = [windSpeedInput, windDirectionInput, moistureInput, liveMois
 const conditionPanel = document.querySelector('#condition-panel');
 const simulationPanel = document.querySelector('#simulation-panel');
 const hoverPausePanels = [conditionPanel, simulationPanel];
+const MAX_PROPAGATION_MINUTES = 120;
+const jacScenarioGateway = createScenarioGateway({
+  mode: 'scenario',
+  adapters: createViteScenarioAdapters(),
+  scenarioOptions: { propagation: 'jac-rothermel' }
+});
 
 // Block-scale retarget (scope change, not a mode toggle — see README §
 // "Block scale" and CLAUDE.md). Field is now 640 m at 10 m/cell, matching
@@ -212,11 +223,15 @@ let globeReady = false;
 let pickedCoordinates = null;
 let cesiumGlobe = null;
 let globeLOD = null;
+let viewMode = null;
 let fireDrape = null;
 // P3: fire is draped on the Cesium globe in place; no camera cut.
 const DRAPE_ON_GLOBE = true;
 
-const fireWorker = new Worker(new URL('./workers/fireWorker.js', import.meta.url), { type: 'module' });
+// The interactive Cesium product is Jac-only. Legacy worker code remains in
+// the repository for offline comparison tooling, but is deliberately not
+// instantiated by the browser entry point.
+const fireWorker = null;
 
 // Block scene: the globe stays the location picker; the camera drops into
 // this local scene on a successful ignite. Fire replay reads the
@@ -305,6 +320,7 @@ let lastLandCover = null;
 let lastFuelDecision = null;
 let scenarioRecords = loadScenarioRecords();
 let activeScenarioContext = null;
+let jacRequestId = 0;
 
 // The Earth texture is a visual guard for clicks and overlay masking. Model
 // water decisions go through resolveWaterEvidence so classified sources can
@@ -866,16 +882,51 @@ function loadImageElement(url) {
 }
 loadLandCoverSource();
 
+function renderViewModeToggle(mode) {
+  if (!viewModeToggle || !viewModeToggleLabel) return;
+  const current = mode === '2d' ? '2D' : '3D';
+  const switchTo = mode === '2d' ? '3D' : '2D';
+  viewModeToggleLabel.textContent = current;
+  viewModeToggle.title = `Switch to ${switchTo} (V)`;
+  viewModeToggle.setAttribute('aria-label', `Switch to ${switchTo} view`);
+  viewModeToggle.setAttribute('aria-pressed', String(mode === '2d'));
+}
+
+function initViewModeToggle(mode) {
+  renderViewModeToggle(mode.mode);
+  mode.onChange(renderViewModeToggle);
+  viewModeToggle?.addEventListener('click', () => mode.toggle());
+  window.addEventListener('keydown', (event) => {
+    if (event.key !== 'v' && event.key !== 'V') return;
+    const target = event.target;
+    const isTyping = target instanceof HTMLElement
+      && (target.tagName === 'INPUT' || target.tagName === 'SELECT'
+        || target.tagName === 'TEXTAREA' || target.isContentEditable);
+    if (!isTyping) mode.toggle();
+  });
+}
+
+function flyToFramed(options) {
+  const flier = viewMode?.mode === '2d' ? cesiumGlobe?.flyToTopDown : cesiumGlobe?.flyToAerial;
+  flier?.(options);
+}
+
 canvas.style.display = 'none';
 try {
   cesiumGlobe = initCesiumGlobe();
+  viewMode = initViewMode({ viewer: cesiumGlobe.viewer });
   // P5: altitude-gated photoreal-tiles <-> shaded terrain globe swap.
-  globeLOD = initGlobeLOD(cesiumGlobe.viewer, cesiumGlobe.tilesetPromise);
+  globeLOD = initGlobeLOD(cesiumGlobe.viewer, cesiumGlobe.tilesetPromise, () => viewMode.mode);
   // P6: same flat overlay as before, plus volumetric flames up close.
   fireDrape = createFireLOD(cesiumGlobe.viewer);
   globeReady = true;
-  if (import.meta.env.DEV) window.__ignis = { viewer: cesiumGlobe.viewer, fireDrape, globe: cesiumGlobe, globeLOD };
-  cesiumGlobe.onGlobeClick(({ lat, lon }) => handleGlobeClick(lat, lon));
+  initViewModeToggle(viewMode);
+  if (import.meta.env.DEV) {
+    window.__ignis = { viewer: cesiumGlobe.viewer, fireDrape, globe: cesiumGlobe, globeLOD, viewMode };
+  }
+  cesiumGlobe.onGlobeClick(({ lat, lon, groundHeightMeters }) => {
+    handleGlobeClick(lat, lon, groundHeightMeters);
+  });
   cesiumGlobe.onPickRefused((message) => {
     resetFireSimulation();
     panelStatus.dataset.mode = 'blocked';
@@ -890,18 +941,26 @@ if (loadingEl) {
   loadingEl.style.opacity = '0';
   setTimeout(() => loadingEl.remove(), 320);
 }
+// Consume the landing-page marker only after the application module has
+// booted. Removing it in the inline head script let Vite's initial reload see
+// a direct /app.html visit and immediately redirect back to the landing page.
+if (new URLSearchParams(window.location.search).get('launch') === '1') {
+  window.history.replaceState(null, '', '/app.html');
+}
 
 // ─────────────────────────────────────────────────────────────
 // Selection
 // ─────────────────────────────────────────────────────────────
-function handleGlobeClick(lat, lon) {
+function handleGlobeClick(lat, lon, groundHeightMeters = 0) {
   if (!globeReady) return;
   const coordinates = { latitude: lat, longitude: lon };
   const isOcean = terrainSampler ? terrainSampler.isWaterAtLatLon(lat, lon) : null;
 
   updateConditionPanel(coordinates, isOcean);
 
-  if (!canIgniteSurface(isOcean)) {
+  // The coarse visual water map is advisory for Cesium. The Jac landscape
+  // adapter resolves the actual 10 m fuel field and remains authoritative.
+  if (!DRAPE_ON_GLOBE && !canIgniteSurface(isOcean)) {
     resetFireSimulation();
     panelStatus.dataset.mode = 'blocked';
     statusText.textContent = surfaceIgnitionMessage(isOcean);
@@ -914,77 +973,174 @@ function handleGlobeClick(lat, lon) {
     setTerrainMetadata(isOcean === true ? 'Ocean · no ignition' : 'Surface unknown');
     return;
   }
-
-  if (SIMULATION_ENGINE === 'phase1' && !landCoverSource) {
-    resetFireSimulation();
-    panelStatus.dataset.mode = 'blocked';
-    statusText.textContent = landCoverSourceStatus === 'loading'
-      ? 'Loading global land-cover field'
-      : 'Global land-cover field unavailable';
-    simulationReadout.textContent = 'Waiting for location-specific fuel data';
-    simulationNote.textContent = 'Fire model paused until land-cover data is available';
-    return;
+  if (DRAPE_ON_GLOBE && isOcean === true) {
+    console.info('[handleGlobeClick] coarse map reports water; deferring to the Jac fuel field');
   }
 
-  // Classify the clicked location for scenario metadata. The phase1 worker
-  // also builds the complete local field from this same source.
-  const landCover = landCoverSource
-    ? landCoverSource.classifyAtLatLon(coordinates.latitude, coordinates.longitude)
-    : null;
-  const fuelDecision = crosswalkLandCoverToFuel(landCover);
-  lastLandCover = landCover;
-  lastFuelDecision = fuelDecision;
-  console.info('[landcover]',
-    landCover ? `${landCover.className} (WC ${landCover.classCode})` : 'no coverage',
-    `→ ${fuelDecision.fuelCode} (${fuelDecision.confidence})`);
-
-  if (!canIgniteFuelDecision(fuelDecision)) {
-    resetFireSimulation();
-    panelStatus.dataset.mode = 'blocked';
-    statusText.textContent = 'Non-burnable surface · no ignition';
-    simulationReadout.textContent = 'Select a burnable land surface';
-    simulationNote.textContent = fuelDecision.rationale;
-    setTerrainMetadata('Non-burnable surface');
-    return;
-  }
-
+  // Fuel eligibility is intentionally resolved by the same scenario adapter
+  // that constructs the Jac request, not by a second click-time classifier.
+  lastLandCover = null;
+  lastFuelDecision = null;
   pickedCoordinates = coordinates;
-  // Tilted aerial framing, fired immediately on click. This must NOT wait on
-  // runFromClick — that blocks on an Overpass round trip, so the camera would
-  // sit top-down for seconds and never move at all if the fetch rejects.
-  if (DRAPE_ON_GLOBE) cesiumGlobe?.flyToAerial({ latitude: lat, longitude: lon });
-  startFireSimulation(coordinates);
+  // Tilted aerial framing fires immediately; the shared scenario gateway can
+  // resolve landscape data independently without delaying this feedback.
+  if (DRAPE_ON_GLOBE) flyToFramed({ latitude: lat, longitude: lon, groundHeightMeters });
 
-  // P3: real WorldCover + OSM ignition, draped onto the globe in place. The
-  // block-scene run above still drives the timeline clock and metrics panels.
-  // The scenario sliders override live weather on this path too, matching the
-  // block scene: a non-zero wind slider wins, otherwise Open-Meteo drives it.
+  // This is the canonical backend-task path: scenarioGateway -> runScenario
+  // -> Jac Rothermel. It owns source routing, terrain/weather context,
+  // cancellation, and completed-result caching. Cesium only renders its
+  // returned field; it does not perform propagation locally.
+  const requestId = ++jacRequestId;
+  panelStatus.dataset.mode = 'running';
+  statusText.textContent = 'Preparing Jac fire solve';
+  simulationReadout.textContent = 'Loading fuel and weather for Jac';
+  pauseButton.disabled = false;
+  resetButton.disabled = false;
+  pauseButton.textContent = 'Pause';
+  pauseButton.setAttribute('aria-label', 'Pause simulation');
   const sliderParams = getSimulationParams();
-  runFromClick({
-    lat,
-    lon,
+  jacScenarioGateway.submit({
+    ignition: { latitude: lat, longitude: lon },
+    // An ignition always transitions into the local fire view. Sampling the
+    // pre-flight orbital camera selected the 500 m regional rung, produced a
+    // 32 km field, and sent the follow-up camera flight through the terrain.
+    // Keep the simulation at the UI's documented 10 m / 640 m local scale.
+    viewHint: { altitudeMeters: 500 },
     overrides: {
-      windSpeed: sliderParams.windSpeed,
-      windDirection: sliderParams.windDirection,
-      deadMoisture: sliderParams.deadMoisture,
-      liveMoisture: sliderParams.liveMoisture,
-      slopeStrength: sliderParams.slopeStrength,
-      useWeatherMoisture: sliderParams.useWeatherMoisture
+      // Match the control semantics of the old globe path: a non-zero wind
+      // slider is an explicit override; otherwise the backend owns weather.
+      windSpeedKmh: sliderParams.windSpeed > 0 ? sliderParams.windSpeed : null,
+      windDirectionDeg: sliderParams.windSpeed > 0 ? sliderParams.windDirection : null,
+      moistureFraction: sliderParams.useWeatherMoisture ? null : sliderParams.deadMoisture,
+      horizonMinutes: MAX_PROPAGATION_MINUTES
     }
-  }).then((result) => {
+  }).then((scenario) => {
+    if (requestId !== jacRequestId) return;
+    if (scenario.simulation.engine !== 'jac-rothermel') {
+      throw new Error(`Unexpected solver: ${scenario.simulation.engine ?? 'unknown'}`);
+    }
+    const result = createDrapeResultFromScenario(scenario);
+    const terrainGroundHeight = scenario.context?.terrainHeights?.[scenario.simulation.ignitionIndex];
+    result.groundHeightMeters = Number.isFinite(terrainGroundHeight)
+      ? terrainGroundHeight
+      : (Number.isFinite(groundHeightMeters) ? groundHeightMeters : 0);
     const m = result.metrics;
-    // The four diagnostics that actually explain an ignition outcome.
-    console.info('[runFromClick]', {
+    const fallbacks = scenario.provenance?.fallbacks ?? [];
+    simulationReadout.textContent = fallbacks.length > 0
+      ? `Jac solved · ${fallbacks.length} data-provider fallback${fallbacks.length === 1 ? '' : 's'} active`
+      : 'Jac solved · environmental data ready';
+    simulationNote.textContent = fallbacks.length > 0
+      ? fallbacks.join(' · ')
+      : (scenario.provenance?.sources ?? []).map(({ name }) => name).filter(Boolean).join(' · ');
+    console.info('[scenarioGateway]', {
       burnedCellCount: m.burnedCellCount,
       burnableCellCount: m.burnableCellCount,
       nonBurnableCellCount: m.nonBurnableCellCount,
       maxFiniteArrivalMinutes: Number(m.maxFiniteArrivalMinutes.toFixed(2))
-    }, `· ${result.buildings.length} buildings · ${result.roads.length} road segments`, result.provenance);
+    }, `· ${scenario.features.buildings.length} buildings · ${scenario.features.roads.length} road segments`, scenario.provenance);
     if (DRAPE_ON_GLOBE) {
       fireDrape?.show(result);
       startDrapePlayback(result);
+      const framedRangeMeters = frameBurnExtent(result, result.groundHeightMeters);
+      console.info('[fireVisual]', {
+        visualScale: VISUAL_CELL_SCALE,
+        framedRangeMeters,
+        burnedCellCount: m.burnedCellCount
+      });
     }
-  }).catch((error) => console.warn('[runFromClick] failed:', error));
+  }).catch((error) => {
+    if (requestId !== jacRequestId) return;
+    console.warn('[scenarioGateway] Jac solve failed:', error);
+    fireDrape?.clear();
+    timelineScrub.disabled = true;
+    pauseButton.disabled = true;
+    panelStatus.dataset.mode = 'blocked';
+    statusText.textContent = 'Jac fire service unavailable';
+    simulationReadout.textContent = 'No local solver fallback is enabled';
+    simulationNote.textContent = error?.message ?? 'Unable to reach Jac RunFire';
+  });
+}
+
+function frameBurnExtent(result, groundHeightMeters) {
+  const { gridSize, bbox, arrivalMinutes, cellSizeMeters } = result;
+  const [west, south, east, north] = bbox;
+  let minRow = Infinity;
+  let maxRow = -Infinity;
+  let minCol = Infinity;
+  let maxCol = -Infinity;
+  for (let index = 0; index < arrivalMinutes.length; index += 1) {
+    if (!Number.isFinite(arrivalMinutes[index])) continue;
+    const row = Math.floor(index / gridSize);
+    const col = index % gridSize;
+    minRow = Math.min(minRow, row);
+    maxRow = Math.max(maxRow, row);
+    minCol = Math.min(minCol, col);
+    maxCol = Math.max(maxCol, col);
+  }
+  if (!Number.isFinite(minRow)) return null;
+
+  const northLat = north - (minRow / gridSize) * (north - south);
+  const southLat = north - ((maxRow + 1) / gridSize) * (north - south);
+  const westLon = west + (minCol / gridSize) * (east - west);
+  const eastLon = west + ((maxCol + 1) / gridSize) * (east - west);
+  const widthMeters = (maxCol - minCol + 1) * cellSizeMeters;
+  const heightMeters = (maxRow - minRow + 1) * cellSizeMeters;
+  const rangeMeters = Math.max(120, Math.hypot(widthMeters, heightMeters) * 1.3);
+  flyToFramed({
+    latitude: (northLat + southLat) / 2,
+    longitude: (westLon + eastLon) / 2,
+    groundHeightMeters,
+    rangeMeters,
+    duration: 1.2
+  });
+  return rangeMeters;
+}
+
+// Renderer adapter only: turn the shared, renderer-neutral scenario contract
+// into the compact texture contract used by the existing Cesium fire overlay.
+function createDrapeResultFromScenario(scenario) {
+  const { region, arrivalField } = scenario;
+  const fuelCodeList = [...new Set(scenario.fuelCodes)];
+  const fuelCodeIndex = new Map(fuelCodeList.map((code, index) => [code, index]));
+  const arrivalMinutes = new Float32Array(arrivalField.length);
+  const fuelCodes = new Uint8Array(arrivalField.length);
+  let burnedCellCount = 0;
+  let maxFiniteArrivalMinutes = 0;
+  let burnableCellCount = 0;
+  for (let index = 0; index < arrivalField.length; index += 1) {
+    const arrival = arrivalField[index];
+    const fuelCode = scenario.fuelCodes[index] ?? 'NB';
+    fuelCodes[index] = fuelCodeIndex.get(fuelCode) ?? 0;
+    if (fuelCode !== 'NB') burnableCellCount += 1;
+    if (arrival < 0) {
+      arrivalMinutes[index] = Infinity;
+      continue;
+    }
+    arrivalMinutes[index] = arrival;
+    burnedCellCount += 1;
+    maxFiniteArrivalMinutes = Math.max(maxFiniteArrivalMinutes, arrival);
+  }
+  return {
+    gridSize: region.gridSize,
+    cellSizeMeters: region.cellSizeMeters,
+    bbox: [region.bbox.west, region.bbox.south, region.bbox.east, region.bbox.north],
+    arrivalMinutes,
+    fuelCodes,
+    metrics: {
+      burnedCellCount,
+      burnableCellCount,
+      nonBurnableCellCount: arrivalField.length - burnableCellCount,
+      maxFiniteArrivalMinutes,
+      maxPropagationMinutes: scenario.simulation.horizonMinutes,
+      cellAreaSquareMeters: region.cellSizeMeters ** 2
+    },
+    provenance: {
+      fuelCodeList,
+      solver: scenario.simulation.engine,
+      sources: scenario.provenance.sources,
+      fallbacks: scenario.provenance.fallbacks
+    }
+  };
 }
 
 // Drape playback. The solver returns every cell's arrival time up front, so
@@ -1019,12 +1175,14 @@ function startDrapePlayback(result) {
     fireDrape?.setTime(0);
     panelStatus.dataset.mode = 'armed';
     statusText.textContent = formatDrapeOutcome(metrics);
+    simulationReadout.textContent = `Jac solved · ${formatDrapeOutcome(metrics)}`;
     simulationNote.textContent = `${metrics.burnableCellCount} burnable · ${metrics.nonBurnableCellCount} non-burnable cells`;
     return;
   }
 
   panelStatus.dataset.mode = 'running';
-  statusText.textContent = 'Simulation running · local scenario';
+  statusText.textContent = 'Simulation running · Jac';
+  simulationReadout.textContent = 'Jac solved · replaying fire spread';
 
   fireDrape?.onTime((minutes) => {
     liveModelMinutes = minutes;
@@ -1035,6 +1193,7 @@ function startDrapePlayback(result) {
     if (minutes >= endMinutes && panelStatus.dataset.mode === 'running') {
       panelStatus.dataset.mode = 'armed';
       statusText.textContent = formatDrapeOutcome(metrics);
+      simulationReadout.textContent = `Jac solved · ${formatDrapeOutcome(metrics)}`;
       simulationNote.textContent = `${metrics.burnedCellCount}/${metrics.burnableCellCount} burnable cells reached · ${metrics.nonBurnableCellCount} non-burnable`;
     }
   });
@@ -1116,7 +1275,9 @@ function applyScenarioPreset() {
 }
 
 function updateSimulationLabels() {
-  windSpeedValue.textContent = `${windSpeedInput.value} km/h`;
+  windSpeedValue.textContent = Number(windSpeedInput.value) === 0
+    ? 'Live weather'
+    : `${windSpeedInput.value} km/h`;
   windDirectionValue.textContent = `${windDirectionInput.value.padStart(3, '0')}°`;
   moistureValue.textContent = `${moistureInput.value}%`;
   liveMoistureValue.textContent = `${liveMoistureInput.value}%`;
@@ -1346,12 +1507,16 @@ function replayScenario(record) {
   slopeInput.value = String(Math.round((params.slopeStrength ?? 0) * 100));
   if (uncertaintyToggle) uncertaintyToggle.checked = params.useUncertaintyEnsemble === true;
   updateSimulationLabels();
-  updateConditionPanel(record.coordinates, false);
-  pickedCoordinates = record.coordinates;
-  startFireSimulation(record.coordinates);
+  // Replays are ordinary Cesium ignitions, never the retired local worker.
+  handleGlobeClick(record.coordinates.latitude, record.coordinates.longitude);
 }
 
 async function startFireSimulation(coordinates) {
+  // Compatibility entry point for stale callers. It cannot start the retired
+  // worker path; every ignition is redirected to the canonical Jac gateway.
+  handleGlobeClick(coordinates.latitude, coordinates.longitude);
+  return;
+
   if (!globeReady || !pickedCoordinates) return;
   const requestId = ++terrainRequestId;
   fineLandCoverStatus = 'Coarse WorldCover mosaic';
@@ -1850,9 +2015,10 @@ async function startFireSimulation(coordinates) {
 }
 
 function resetFireSimulation() {
+  jacRequestId += 1;
+  jacScenarioGateway.cancel();
   terrainRequestId += 1;
   fireRunId += 1;
-  fireWorker.postMessage({ type: 'stop' });
   fireRunning = false;
   firePaused = false;
   restoreGlobeCamera();
@@ -1941,7 +2107,7 @@ function formatRateMetric(rateKmh) {
   return `${rate.toFixed(1)} km/h`;
 }
 
-fireWorker.onmessage = ({ data }) => {
+if (fireWorker) fireWorker.onmessage = ({ data }) => {
   if (data.type !== 'frame' || data.runId && data.runId !== fireRunId) return;
   if (!fireTexture) return;
   fireTexture.image.data = data.frame;
@@ -2100,7 +2266,22 @@ timelineScrub.addEventListener('input', () => {
 timelineScrub.addEventListener('change', () => {
   delete timelineScrub.dataset.scrubbing;
 });
-pauseButton.addEventListener('click', () => fireWorker.postMessage({ type: 'pause' }));
+pauseButton.addEventListener('click', () => {
+  if (!fireDrape) return;
+  if (fireDrape.isPlaying) {
+    fireDrape.pause();
+    pauseButton.textContent = 'Resume';
+    pauseButton.setAttribute('aria-label', 'Resume simulation');
+    panelStatus.dataset.mode = 'armed';
+    statusText.textContent = 'Jac playback paused';
+  } else {
+    fireDrape.play();
+    pauseButton.textContent = 'Pause';
+    pauseButton.setAttribute('aria-label', 'Pause simulation');
+    panelStatus.dataset.mode = 'running';
+    statusText.textContent = 'Simulation running · Jac';
+  }
+});
 resetButton.addEventListener('click', resetFireSimulation);
 runHistoryList?.addEventListener('click', handleHistoryClick);
 metadataToggle?.addEventListener('click', () => {

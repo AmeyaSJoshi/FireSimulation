@@ -57,6 +57,7 @@ import {
   globalFuelbedTileUrl
 } from './src/lib/globalFuelbed.js';
 import { rasterSampleValue } from './src/lib/rasterSampling.js';
+import { buildOverpassQuery, OVERPASS_INTERPRETER_URL } from './src/lib/urbanFootprints.js';
 
 const MAX_FINE_SAMPLES = 65536;
 const MAX_CACHED_TILES = 4;
@@ -492,10 +493,11 @@ function worldCoverFinePlugin() {
         const isFractionPoint = requestUrl.pathname === '/api/landcover/fractions';
         const isFractionField = requestUrl.pathname === '/api/landcover/fractions-field';
         const isGlobalFuelbedField = requestUrl.pathname === '/api/fuelbed/global-field';
+        const isOsmFeatures = requestUrl.pathname === '/api/osm/features';
         if (!isFinePoint && !isFineField && !isCanopyPoint && !isCanopyField
           && !isLandfireCanopyField
           && !isLandfireFuelField
-          && !isFractionPoint && !isFractionField && !isGlobalFuelbedField) {
+          && !isFractionPoint && !isFractionField && !isGlobalFuelbedField && !isOsmFeatures) {
           next();
           return;
         }
@@ -504,6 +506,33 @@ function worldCoverFinePlugin() {
           return;
         }
         try {
+          if (isOsmFeatures) {
+            const bbox = (await readRequestBody(request))?.bbox;
+            if (!Array.isArray(bbox) || bbox.length !== 4) {
+              throw new RangeError('bbox must be [west, south, east, north]');
+            }
+            const [west, south, east, north] = bbox.map((value, index) => parseCoordinate(
+              value,
+              ['west', 'south', 'east', 'north'][index],
+              index % 2 === 0 ? -180 : -90,
+              index % 2 === 0 ? 180 : 90
+            ));
+            if (west >= east || south >= north) throw new RangeError('bbox must be an ordered geographic extent');
+            // The primary Overpass instance currently rejects proxied POSTs
+            // with 406, while its documented GET form remains supported.
+            const overpassUrl = new URL(OVERPASS_INTERPRETER_URL);
+            overpassUrl.searchParams.set('data', buildOverpassQuery([south, west, north, east]));
+            const upstream = await fetch(overpassUrl, {
+              headers: {
+                Accept: 'application/json',
+                'User-Agent': 'Ignis-FireSimulation/0.1 (local-development)'
+              }
+            });
+            if (!upstream.ok) throw new Error(`Overpass request failed with HTTP ${upstream.status}`);
+            const payload = await upstream.json();
+            writeJson(response, 200, { elements: Array.isArray(payload?.elements) ? payload.elements : [] });
+            return;
+          }
           if (isGlobalFuelbedField) {
             const body = await readRequestBody(request);
             const samples = body?.samples;
@@ -727,6 +756,23 @@ function worldCoverFinePlugin() {
 export default defineConfig({
   plugins: [worldCoverFinePlugin(), cesium()],
   server: {
-    host: '127.0.0.1'
+    host: '127.0.0.1',
+    proxy: {
+      // Keep the browser on the Vite origin in local development so the Jac
+      // API does not need a separate CORS configuration.
+      '/jac': {
+        target: 'http://127.0.0.1:8010',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/jac/, '')
+      }
+    }
+  },
+  build: {
+    rollupOptions: {
+      input: {
+        landing: path.resolve(process.cwd(), 'index.html'),
+        app: path.resolve(process.cwd(), 'app.html')
+      }
+    }
   }
 });

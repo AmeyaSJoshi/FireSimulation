@@ -38,6 +38,7 @@ const HOURLY_FIELDS = [
   'wind_speed_10m',
   'wind_direction_10m'
 ];
+const CURRENT_WIND_FIELDS = ['wind_speed_10m', 'wind_direction_10m', 'wind_gusts_10m'];
 
 const MIDFLAME_MULT_OPEN = 0.4;      // Baughman & Albini 1980 midflame factor for exposed fuels
 const MIDFLAME_MULT_SHELT = 0.2;     // Sheltered under canopy — conservative starter value
@@ -191,6 +192,15 @@ export function isWeatherStale(entry, ttlMs) {
   return (Date.now() - entry.fetchedAt) > ttlMs;
 }
 
+async function fetchWithRateLimitRetry(fetchImpl, url, signal, delayMs) {
+  let response = await fetchImpl(url, signal ? { signal } : undefined);
+  if (response.status === 429 && !signal?.aborted) {
+    await new Promise((resolve) => setTimeout(resolve, Math.max(0, delayMs)));
+    response = await fetchImpl(url, signal ? { signal } : undefined);
+  }
+  return response;
+}
+
 function normalizeHourlyWeather(payload, observationTime) {
   const hourly = payload?.hourly;
   if (!hourly || !Array.isArray(hourly.time)) return [];
@@ -335,7 +345,8 @@ export async function fetchWeatherInputs({
   fuelModel = null,
   initialDeadMoistureByClass = null,
   fetchImpl = globalThis.fetch,
-  timeoutMs = 8000
+  timeoutMs = 8000,
+  rateLimitRetryDelayMs = 500
 }) {
   if (typeof fetchImpl !== 'function') {
     throw new Error('weatherInputs: fetch implementation unavailable');
@@ -345,11 +356,12 @@ export async function fetchWeatherInputs({
   url.searchParams.set('longitude', String(longitude));
   url.searchParams.set('current', CURRENT_FIELDS.join(','));
   url.searchParams.set('hourly', HOURLY_FIELDS.join(','));
-  url.searchParams.set('past_days', '35');
-  // The interactive fire horizon is 72 hours. Keep a full forecast over that
-  // horizon so the arrival solver never silently holds the last forecast
-  // hour constant for the rest of the run.
-  url.searchParams.set('forecast_days', '3');
+  // Seven days provides a conservative 100-hour-fuel moisture spin-up while
+  // keeping an interactive request well inside public-provider fair use.
+  url.searchParams.set('past_days', '7');
+  // Aethon's fire window is two hours; one forecast day is ample for the
+  // weather timeline and avoids fetching unused multi-day data.
+  url.searchParams.set('forecast_days', '1');
   url.searchParams.set('wind_speed_unit', 'kmh');
   url.searchParams.set('timezone', 'GMT');
 
@@ -357,7 +369,7 @@ export async function fetchWeatherInputs({
   const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
   let response;
   try {
-    response = await fetchImpl(url.toString(), controller ? { signal: controller.signal } : undefined);
+    response = await fetchWithRateLimitRetry(fetchImpl, url.toString(), controller?.signal, rateLimitRetryDelayMs);
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -384,10 +396,8 @@ export async function fetchWeatherInputs({
   const allHourlyWeather = normalizeHourlyWeather(payload, current.time);
   const observationMs = Date.parse(current.time);
   const hourlyWeather = allHourlyWeather.filter((hour) => Date.parse(hour.time) <= observationMs);
-  // Keep the full available history so the 100-hour fuel class receives a
-  // physically meaningful spin-up. The endpoint requests 35 past days,
-  // which is long enough to avoid replacing that state with an arbitrary
-  // 48-hour window.
+  // Keep the complete requested history so the 100-hour fuel class receives
+  // a physically meaningful spin-up rather than an arbitrary short window.
   const deadFuelHours = hourlyWeather;
   const fuelMoisture = deadFuelHours.length > 0
     ? estimateDeadFuelMoistureFromHourlyWeather({
@@ -465,4 +475,42 @@ export async function fetchWeatherInputs({
       forecastMoistureHours: weatherTimeline.length
     }
   };
+}
+
+// Kept separate from moisture history so a normal ignition can obtain live
+// 10 m wind without paying for a multi-day weather payload.
+export async function fetchCurrentWind({
+  latitude,
+  longitude,
+  fetchImpl = globalThis.fetch,
+  timeoutMs = 5000,
+  rateLimitRetryDelayMs = 500
+} = {}) {
+  if (typeof fetchImpl !== 'function') throw new Error('current wind fetch is unavailable');
+  const url = new URL(OPEN_METEO_FORECAST_URL);
+  url.searchParams.set('latitude', String(latitude));
+  url.searchParams.set('longitude', String(longitude));
+  url.searchParams.set('current', CURRENT_WIND_FIELDS.join(','));
+  url.searchParams.set('wind_speed_unit', 'kmh');
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const response = await fetchWithRateLimitRetry(fetchImpl, url.toString(), controller?.signal, rateLimitRetryDelayMs);
+    if (!response.ok) throw new Error(`current wind fetch failed with HTTP ${response.status}`);
+    const current = (await response.json())?.current;
+    if (!Number.isFinite(current?.wind_speed_10m) || !Number.isFinite(current?.wind_direction_10m)) {
+      throw new Error('current wind response missing speed or direction');
+    }
+    return {
+      source: 'Open-Meteo /forecast (current wind)',
+      attribution: 'Open-Meteo · CC BY 4.0',
+      fetchedAt: Date.now(),
+      observationTime: current.time ?? null,
+      tenMeterSpeedKmh: current.wind_speed_10m,
+      compassDirectionDeg: current.wind_direction_10m,
+      gustsKmh: Number.isFinite(current.wind_gusts_10m) ? current.wind_gusts_10m : null
+    };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }

@@ -1,0 +1,9 @@
+[project]
+name = "ignis-jac-backend"
+version = "0.1.0"
+description = "Jac graph traversal backend for IGNIS fire scenarios"
+entry-point = "main.jac"
+kind = "api-service"
+
+[dependencies]
+
