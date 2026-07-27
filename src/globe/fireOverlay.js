@@ -156,26 +156,34 @@ czm_material czm_getMaterial(czm_materialInput materialInput) {
 // A 2s expanding ring + glow at the ignition cell. Purely cosmetic — guides
 // the eye to the click point even when the eventual burn stays tiny.
 function playIgnitionFlare(viewer, { latitude, longitude, groundHeightMeters }) {
-  const startMs = performance.now();
+  const startJulian = Cesium.JulianDate.clone(viewer.clock.currentTime);
   const position = Cesium.Cartesian3.fromDegrees(longitude, latitude, groundHeightMeters + 1);
-  const radius = () => {
-    const t = Math.min(1, (performance.now() - startMs) / IGNITION_FLARE_MS);
-    return 4 + Cesium.Math.lerp(0, IGNITION_FLARE_MAX_RADIUS_M, 1 - Math.pow(1 - t, 2));
-  };
+  // Semi-major/minor MUST be numerically identical for a valid ellipse.
+  // Two separate CallbackPropertys each reading performance.now() can
+  // disagree by microseconds between calls (Cesium invokes them
+  // independently), which threw "semiMajorAxis must be >= semiMinorAxis"
+  // and halted rendering. Deriving t from the `time` argument Cesium passes
+  // to the callback — the same JulianDate for both axes on a given tick —
+  // makes this a pure function, so both reads are bit-identical.
+  const progressAt = (time) => Math.min(
+    1,
+    Math.max(0, Cesium.JulianDate.secondsDifference(time, startJulian)) / (IGNITION_FLARE_MS / 1000)
+  );
+  const radiusAt = (time) => 4 + Cesium.Math.lerp(0, IGNITION_FLARE_MAX_RADIUS_M, 1 - Math.pow(1 - progressAt(time), 2));
   const entity = viewer.entities.add({
     position,
     ellipse: {
-      semiMinorAxis: new Cesium.CallbackProperty(radius, false),
-      semiMajorAxis: new Cesium.CallbackProperty(radius, false),
+      semiMinorAxis: new Cesium.CallbackProperty((time) => radiusAt(time), false),
+      semiMajorAxis: new Cesium.CallbackProperty((time) => radiusAt(time), false),
       height: groundHeightMeters + 1,
       outline: true,
       outlineWidth: 2,
-      outlineColor: new Cesium.CallbackProperty(() => {
-        const t = Math.min(1, (performance.now() - startMs) / IGNITION_FLARE_MS);
+      outlineColor: new Cesium.CallbackProperty((time) => {
+        const t = progressAt(time);
         return Cesium.Color.fromBytes(255, 240, 200, Math.round((1 - t) * 255));
       }, false),
-      material: new Cesium.ColorMaterialProperty(new Cesium.CallbackProperty(() => {
-        const t = Math.min(1, (performance.now() - startMs) / IGNITION_FLARE_MS);
+      material: new Cesium.ColorMaterialProperty(new Cesium.CallbackProperty((time) => {
+        const t = progressAt(time);
         return Cesium.Color.fromBytes(255, 225, 150, Math.round((1 - t) * 140));
       }, false))
     }
