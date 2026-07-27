@@ -33,7 +33,7 @@ const ARRIVAL_ENCODE_SCALE = 60; // 1/60 min per unit => ~1s resolution
 // Widened from the original 1.5 min: combined with the splat radius above,
 // this keeps the leading edge a visibly thick, slow-pulsing band instead of
 // a thin line that vanishes between ticks on a slow-spreading fire.
-const FRONT_WINDOW_MINUTES = 3.0;
+const FRONT_WINDOW_MINUTES = 8.0;
 const IGNITION_FLARE_MS = 2000;
 const IGNITION_FLARE_MAX_RADIUS_M = 60;
 
@@ -93,6 +93,8 @@ const float HALF_TEXEL = TEXEL * 0.5;
 const float NEVER_BURNS = 1.0e6;
 const int RING_TAPS = 8;
 const float TWO_PI = 6.28318530718;
+const float EDGE_FEATHER = 0.08;
+const float DOMAIN_WARP_TEXELS = 1.5;
 
 // Every tap (primary bilinear corners, ring dilation samples) is clamped
 // through this so edge/corner cells never wrap or bleed into the opposite
@@ -104,6 +106,41 @@ vec2 clampUV(vec2 uv) {
 float decodeArrivalTexel(vec4 texel) {
   if (texel.a < 0.5) return NEVER_BURNS; // never-burnable cell — treat as arriving effectively never
   return (texel.r * 255.0 + texel.g * 255.0 * 256.0) / ${ARRIVAL_ENCODE_SCALE}.0;
+}
+
+float hash21(vec2 p) {
+  p = fract(p * vec2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
+}
+
+float valueNoise(vec2 p) {
+  vec2 cell = floor(p);
+  vec2 local = fract(p);
+  local = local * local * (3.0 - 2.0 * local);
+  float a = hash21(cell);
+  float b = hash21(cell + vec2(1.0, 0.0));
+  float c = hash21(cell + vec2(0.0, 1.0));
+  float d = hash21(cell + vec2(1.0, 1.0));
+  return mix(mix(a, b, local.x), mix(c, d, local.x), local.y);
+}
+
+float fbm3(vec2 p) {
+  float value = 0.0;
+  value += valueNoise(p) * 0.5714;
+  value += valueNoise(p * 2.03 + 17.1) * 0.2857;
+  value += valueNoise(p * 4.11 + 41.7) * 0.1429;
+  return value;
+}
+
+vec2 domainWarpUV(vec2 uv, out float noiseField) {
+  vec2 p = uv * GRID_SIZE * 0.22;
+  float nx = fbm3(p + vec2(7.3, 19.1));
+  float ny = fbm3(p + vec2(31.7, 4.6));
+  noiseField = fbm3(p * 0.73 + vec2(nx, ny) * 2.2 + vec2(53.2, 11.8));
+  // nx/ny are [0,1], so this is exactly +/- 1.5 texels per axis.
+  vec2 warp = (vec2(nx, ny) - 0.5) * (2.0 * DOMAIN_WARP_TEXELS * TEXEL);
+  return clampUV(uv + warp);
 }
 
 // Manual 4-tap bilinear: decode each of the 4 nearest texels to minutes
@@ -141,18 +178,24 @@ vec4 debugCellColor(vec2 uv) {
 
 czm_material czm_getMaterial(czm_materialInput materialInput) {
   czm_material material = czm_getDefaultMaterial(materialInput);
-  vec2 uv = clampUV(vec2(materialInput.st.x, 1.0 - materialInput.st.y));
+  vec2 rawUV = vec2(materialInput.st.x, 1.0 - materialInput.st.y);
+  float edgeDistance = min(min(rawUV.x, 1.0 - rawUV.x), min(rawUV.y, 1.0 - rawUV.y));
+  float edgeAlpha = smoothstep(0.0, EDGE_FEATHER, edgeDistance);
+  vec2 uv = clampUV(rawUV);
 
   if (uDebugCells > 0.5) {
     vec4 debugColor = debugCellColor(uv);
     material.diffuse = debugColor.rgb;
-    material.alpha = debugColor.a;
+    material.alpha = debugColor.a * edgeAlpha;
     return material;
   }
 
+  float domainNoise;
+  vec2 fireUV = domainWarpUV(uv, domainNoise);
+
   float primaryArrival;
   float primaryIntensity;
-  sampleBilinear(uv, primaryArrival, primaryIntensity);
+  sampleBilinear(fireUV, primaryArrival, primaryIntensity);
 
   // Visual-minimum-size guarantee: take the minimum decoded arrival within a
   // VISUAL_DILATE_CELLS ring (offset derived from GRID_SIZE, not a hardcoded
@@ -162,19 +205,23 @@ czm_material czm_getMaterial(czm_materialInput materialInput) {
   float ringUV = VISUAL_DILATE_CELLS * TEXEL;
   for (int i = 0; i < RING_TAPS; i += 1) {
     float angle = (float(i) / float(RING_TAPS)) * TWO_PI;
-    vec2 ringUv = clampUV(uv + vec2(cos(angle), sin(angle)) * ringUV);
+    vec2 ringUv = clampUV(fireUV + vec2(cos(angle), sin(angle)) * ringUV);
     float ringArrival;
     float ringIntensity;
     sampleBilinear(ringUv, ringArrival, ringIntensity);
     dilatedArrival = min(dilatedArrival, ringArrival);
   }
 
-  if (dilatedArrival > uTime) {
+  // The same low-frequency field that warps the domain also offsets the
+  // visual arrival threshold. This makes the active front ragged while the
+  // encoded arrival data remains untouched.
+  float raggedArrival = dilatedArrival + (domainNoise - 0.5) * uFrontWindow * 0.62;
+  if (raggedArrival > uTime) {
     material.alpha = 0.0;
     return material;
   }
 
-  float age = uTime - dilatedArrival;
+  float age = uTime - raggedArrival;
   float front = smoothstep(0.0, 1.0, 1.0 - clamp(age / uFrontWindow, 0.0, 1.0));
   float glow = pow(front, 2.2);
 
@@ -185,9 +232,8 @@ czm_material czm_getMaterial(czm_materialInput materialInput) {
 
   // Static (time-independent) per-cell noise so the charcoal reads as a
   // textured scar rather than a flat fill. Never touches alpha.
-  vec2 cell = floor(uv * GRID_SIZE);
-  float cellHash = fract(sin(dot(cell, vec2(12.9898, 78.233))) * 43758.5453);
-  float noise = 0.85 + 0.15 * cellHash;
+  float scarNoise = fbm3(fireUV * GRID_SIZE * 0.38 + vec2(9.2, 27.4));
+  float noise = 0.82 + 0.18 * scarNoise;
 
   // Contrast floors: charcoal never disappears against pale dirt, and the
   // active front is near-white/yellow so it blooms over dark forest too.
@@ -199,10 +245,10 @@ czm_material czm_getMaterial(czm_materialInput materialInput) {
   color = mix(color, flameColor, smoothstep(0.0, 1.0, pow(frontPulse, 2.0)));
 
   material.diffuse = color;
-  material.emission = color * frontPulse * (1.6 + 2.0 * primaryIntensity);
+  material.emission = color * frontPulse * (1.6 + 2.0 * primaryIntensity) * edgeAlpha;
   // Burned alpha is constant once ignited — it never decays with age. No
   // ember fade-out: the interior of a long run stays solid charcoal forever.
-  material.alpha = 0.8;
+  material.alpha = 0.8 * edgeAlpha;
   return material;
 }
 `;

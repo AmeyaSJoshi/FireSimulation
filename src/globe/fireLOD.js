@@ -36,24 +36,98 @@ const UPDATE_THROTTLE_MS = 140;
 // volume, smouldering cells stay as the base layer's dim points.
 const FRONT_WINDOW_MINUTES = 8;
 const FLAME_LIFT_METERS = 3;
+const FLAME_LAYERS = Object.freeze([
+  { height: 0.0, scale: 1.15, scrollRate: 4.1, phase: 0.0, buoyancy: 5.5, curl: 1.15 },
+  { height: 4.5, scale: 0.88, scrollRate: 5.7, phase: 2.1, buoyancy: 6.8, curl: 1.45 },
+  { height: 9.0, scale: 0.64, scrollRate: 7.3, phase: 4.4, buoyancy: 8.0, curl: 1.75 }
+]);
+
+// RenderState validates against limits populated by Cesium's WebGL Context.
+// Building it at module import time runs before that context exists and throws
+// a DeveloperError, aborting the whole app bootstrap. Create it lazily from
+// preRender, once the viewer has initialized those limits.
+let additiveDepthTestState = null;
+
+const forceScratch = new Cesium.Cartesian3();
+const curlScratch = new Cesium.Cartesian3();
+
+function applyFlameForces(system, particle, dt) {
+  if (!system._flameUp) return;
+
+  // Buoyancy always follows geodetic up from the cell's ENU frame.
+  Cesium.Cartesian3.multiplyByScalar(
+    system._flameUp,
+    system._flameBuoyancy * dt,
+    forceScratch
+  );
+  Cesium.Cartesian3.add(particle.velocity, forceScratch, particle.velocity);
+
+  // Two incommensurate waves make a cheap curl field. Each stacked layer has
+  // a different phase and scroll rate, so the silhouettes never move as one.
+  const phase = system._flamePhase
+    + particle.age * system._flameScrollRate
+    + (particle.position.x + particle.position.y + particle.position.z) * 0.00012;
+  Cesium.Cartesian3.multiplyByScalar(system._flameEast, Math.sin(phase), curlScratch);
+  Cesium.Cartesian3.multiplyByScalar(
+    system._flameNorth,
+    Math.cos(phase * 1.37 + system._flamePhase),
+    forceScratch
+  );
+  Cesium.Cartesian3.add(curlScratch, forceScratch, curlScratch);
+  Cesium.Cartesian3.multiplyByScalar(
+    curlScratch,
+    system._flameCurl * dt,
+    curlScratch
+  );
+  Cesium.Cartesian3.add(particle.velocity, curlScratch, particle.velocity);
+}
+
+function configureAdditiveParticleLayer(system) {
+  const collection = system._billboardCollection;
+  if (!collection) return;
+  if (!additiveDepthTestState) {
+    additiveDepthTestState = Cesium.RenderState.fromCache({
+      depthTest: { enabled: true, func: Cesium.WebGLConstants.LEQUAL },
+      depthMask: false,
+      blending: Cesium.BlendingState.ADDITIVE_BLEND
+    });
+  }
+  collection.blendOption = Cesium.BlendOption.TRANSLUCENT;
+  // ParticleSystem does not expose the wrapped billboard render state. Keep
+  // its depth test, remove its depth write, and use additive color blending.
+  collection._rsOpaque = undefined;
+  collection._rsTranslucent = additiveDepthTestState;
+}
+
 function flameScaleForFuel(fuelIndex) {
   if (fuelIndex >= 18) return 2.2;  // TU*/TL* timber
   if (fuelIndex >= 10) return 1.5;  // SH* brush
   return 1.0;                        // GR*/GS* grass
 }
 
-// Soft radial blob. One canvas shared by every system in the pool.
+// Tall premultiplied-looking flame sprite. Runtime composition is additive,
+// so overlapping particles build a bright core instead of flat alpha cards.
 function makeParticleImage() {
   const canvas = document.createElement('canvas');
-  canvas.width = 32;
-  canvas.height = 32;
+  canvas.width = 48;
+  canvas.height = 96;
   const ctx = canvas.getContext('2d');
-  const gradient = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
-  gradient.addColorStop(0, 'rgba(255,255,255,1)');
-  gradient.addColorStop(0.35, 'rgba(255,236,170,0.85)');
-  gradient.addColorStop(1, 'rgba(255,180,60,0)');
-  ctx.fillStyle = gradient;
-  ctx.fillRect(0, 0, 32, 32);
+  ctx.globalCompositeOperation = 'lighter';
+
+  const body = ctx.createRadialGradient(24, 67, 1, 24, 58, 30);
+  body.addColorStop(0, 'rgba(255,255,235,0.98)');
+  body.addColorStop(0.26, 'rgba(255,226,92,0.90)');
+  body.addColorStop(0.62, 'rgba(255,104,16,0.56)');
+  body.addColorStop(1, 'rgba(255,40,0,0)');
+  ctx.fillStyle = body;
+  ctx.fillRect(0, 20, 48, 76);
+
+  const tip = ctx.createRadialGradient(24, 42, 0, 24, 42, 23);
+  tip.addColorStop(0, 'rgba(255,242,150,0.72)');
+  tip.addColorStop(0.48, 'rgba(255,122,18,0.34)');
+  tip.addColorStop(1, 'rgba(255,50,0,0)');
+  ctx.fillStyle = tip;
+  ctx.fillRect(4, 2, 40, 64);
   return canvas;
 }
 
@@ -65,50 +139,49 @@ export function createFireLOD(viewer) {
   let cellPositions = null;
   let timeMinutes = 0;
   let pool = [];
-  let billboardPool = null;
   let removeListener = null;
   let lastUpdate = 0;
   let dirty = false;
 
   function ensurePool() {
     if (pool.length > 0) return;
-    billboardPool = viewer.scene.primitives.add(new Cesium.BillboardCollection({ scene: viewer.scene }));
-    for (let i = 0; i < MAX_VOLUMETRIC_CELLS; i += 1) {
-      const system = new Cesium.ParticleSystem({
-        image: particleImage,
-        startColor: new Cesium.Color(1.0, 0.86, 0.38, 0.85),
-        endColor: new Cesium.Color(0.8, 0.16, 0.02, 0.0),
-        startScale: 0.9,
-        endScale: 2.8,
-        minimumParticleLife: 0.6,
-        maximumParticleLife: 1.4,
-        minimumSpeed: 3.0,
-        maximumSpeed: 8.0,
-        imageSize: new Cesium.Cartesian2(2.0 * VISUAL_CELL_SCALE, 2.0 * VISUAL_CELL_SCALE),
-        emissionRate: 24,
-        // Metres, not pixels — flames must keep physical size as you approach.
-        sizeInMeters: true,
-        loop: true,
-        emitter: new Cesium.ConeEmitter(Cesium.Math.toRadians(16)),
-        show: false
-      });
-      viewer.scene.primitives.add(system);
-      pool.push(system);
-      billboardPool.add({
-        image: particleImage,
-        show: false,
-        verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
-        disableDepthTestDistance: Number.POSITIVE_INFINITY,
-        scaleByDistance: new Cesium.NearFarScalar(0, 1.4, 2_500, 0.55)
-      });
+    for (let cell = 0; cell < MAX_VOLUMETRIC_CELLS; cell += 1) {
+      for (const layer of FLAME_LAYERS) {
+        let system;
+        system = new Cesium.ParticleSystem({
+          image: particleImage,
+          startColor: new Cesium.Color(1.0, 0.88, 0.38, 0.78),
+          endColor: new Cesium.Color(1.0, 0.08, 0.01, 0.0),
+          startScale: 0.72,
+          endScale: 2.35,
+          minimumParticleLife: 0.65,
+          maximumParticleLife: 1.5,
+          minimumSpeed: 2.8,
+          maximumSpeed: 7.5,
+          imageSize: new Cesium.Cartesian2(2.0 * VISUAL_CELL_SCALE, 4.0 * VISUAL_CELL_SCALE),
+          emissionRate: 18,
+          sizeInMeters: true,
+          loop: true,
+          modelMatrix: Cesium.Matrix4.IDENTITY,
+          emitterModelMatrix: Cesium.Matrix4.IDENTITY,
+          emitter: new Cesium.ConeEmitter(Cesium.Math.toRadians(13)),
+          updateCallback: (particle, dt) => applyFlameForces(system, particle, dt),
+          show: false
+        });
+        system._flameLayer = layer;
+        system._flameScrollRate = layer.scrollRate;
+        system._flamePhase = layer.phase + cell * 0.618;
+        system._flameBuoyancy = layer.buoyancy;
+        system._flameCurl = layer.curl;
+        viewer.scene.primitives.add(system);
+        pool.push(system);
+      }
     }
   }
 
   function destroyPool() {
     for (const system of pool) viewer.scene.primitives.remove(system);
     pool = [];
-    if (billboardPool) viewer.scene.primitives.remove(billboardPool);
-    billboardPool = null;
   }
 
   // Same cell-centre derivation and single-sample surface lift P4 uses. Kept
@@ -132,7 +205,6 @@ export function createFireLOD(viewer) {
   function hideAll(fromIndex = 0) {
     for (let i = fromIndex; i < pool.length; i += 1) {
       pool[i].show = false;
-      if (billboardPool) billboardPool.get(i).show = false;
     }
   }
 
@@ -171,25 +243,44 @@ export function createFireLOD(viewer) {
     }
     candidates.sort((a, b) => a.distance - b.distance);
 
-    const used = Math.min(candidates.length, pool.length);
-    for (let slot = 0; slot < used; slot += 1) {
-      const { index, heat } = candidates[slot];
-      const system = pool[slot];
+    const usedCells = Math.min(candidates.length, MAX_VOLUMETRIC_CELLS);
+    for (let cellSlot = 0; cellSlot < usedCells; cellSlot += 1) {
+      const { index, heat } = candidates[cellSlot];
       const scale = flameScaleForFuel(fuelCodes[index]);
-      system.modelMatrix = Cesium.Transforms.eastNorthUpToFixedFrame(cellPositions[index]);
-      system.imageSize = new Cesium.Cartesian2(4 * scale * VISUAL_CELL_SCALE, 4 * scale * VISUAL_CELL_SCALE);
-      system.emissionRate = 14 + 22 * heat * scale;
-      system.maximumSpeed = 5.0 + 5.0 * scale;
-      system.minimumSpeed = 2.5 * scale;
-      system.show = true;
-      const billboard = billboardPool.get(slot);
-      billboard.position = cellPositions[index];
-      billboard.width = 18 + 8 * scale;
-      billboard.height = 38 + 18 * scale;
-      billboard.color = Cesium.Color.fromBytes(255, Math.round(150 + 55 * heat), 45, 235);
-      billboard.show = true;
+      const enuFrame = Cesium.Transforms.eastNorthUpToFixedFrame(cellPositions[index]);
+      const east = Cesium.Matrix4.multiplyByPointAsVector(enuFrame, Cesium.Cartesian3.UNIT_X, new Cesium.Cartesian3());
+      const north = Cesium.Matrix4.multiplyByPointAsVector(enuFrame, Cesium.Cartesian3.UNIT_Y, new Cesium.Cartesian3());
+      const up = Cesium.Matrix4.multiplyByPointAsVector(enuFrame, Cesium.Cartesian3.UNIT_Z, new Cesium.Cartesian3());
+
+      for (let layerIndex = 0; layerIndex < FLAME_LAYERS.length; layerIndex += 1) {
+        const layer = FLAME_LAYERS[layerIndex];
+        const systemSlot = cellSlot * FLAME_LAYERS.length + layerIndex;
+        const system = pool[systemSlot];
+        const localOffset = new Cesium.Cartesian3(0, 0, layer.height * scale);
+
+        // Keep the ParticleSystem frame in world coordinates and explicitly
+        // orient its emitter with ENU. Cone +Z is therefore geodetic up at any
+        // latitude instead of inheriting identity/world-axis orientation.
+        system.modelMatrix = Cesium.Matrix4.IDENTITY;
+        system.emitterModelMatrix = Cesium.Matrix4.multiplyByTranslation(
+          enuFrame,
+          localOffset,
+          new Cesium.Matrix4()
+        );
+        system._flameEast = Cesium.Cartesian3.clone(east, system._flameEast);
+        system._flameNorth = Cesium.Cartesian3.clone(north, system._flameNorth);
+        system._flameUp = Cesium.Cartesian3.clone(up, system._flameUp);
+        system.imageSize = new Cesium.Cartesian2(
+          2.4 * scale * layer.scale * VISUAL_CELL_SCALE,
+          5.4 * scale * layer.scale * VISUAL_CELL_SCALE
+        );
+        system.emissionRate = (10 + 15 * heat * scale) * layer.scale;
+        system.maximumSpeed = (5.0 + 4.0 * scale) * (0.9 + 0.12 * layerIndex);
+        system.minimumSpeed = 2.5 * scale;
+        system.show = true;
+      }
     }
-    hideAll(used);
+    hideAll(usedCells * FLAME_LAYERS.length);
   }
 
   function onPreRender() {
@@ -198,6 +289,7 @@ export function createFireLOD(viewer) {
     lastUpdate = now;
     dirty = false;
     updateVolumetric();
+    for (const system of pool) configureAdditiveParticleLayer(system);
   }
 
   return {

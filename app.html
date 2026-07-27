@@ -17,6 +17,14 @@
   </head>
   <body>
     <div id="app">
+      <svg class="liquid-glass-defs" width="0" height="0" aria-hidden="true" focusable="false">
+        <defs>
+          <filter id="liquid-glass-distortion" x="-8%" y="-8%" width="116%" height="116%">
+            <feTurbulence type="fractalNoise" baseFrequency="0.008 0.015" numOctaves="2" seed="8" result="glass-noise" />
+            <feDisplacementMap in="SourceGraphic" in2="glass-noise" scale="8" xChannelSelector="R" yChannelSelector="G" />
+          </filter>
+        </defs>
+      </svg>
       <canvas id="scene"></canvas>
       <div id="loading">Loading terrain</div>
       <div id="scene-guide" aria-label="Simulation legend and scale">
@@ -34,7 +42,33 @@
         </div>
       </div>
 
-      <section id="condition-panel" aria-live="polite">
+      <section id="geocoder-panel" role="search" aria-label="Search places">
+        <form id="geocoder-form" autocomplete="off">
+          <svg class="geocoder-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <circle cx="7" cy="7" r="4.6" stroke="currentColor" stroke-width="1.35" />
+            <path d="M10.5 10.5l3.2 3.2" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" />
+          </svg>
+          <label class="sr-only" for="geocoder-input">Search for a place</label>
+          <input
+            id="geocoder-input"
+            type="search"
+            placeholder="Search city, landmark, address"
+            role="combobox"
+            aria-autocomplete="list"
+            aria-controls="geocoder-results"
+            aria-expanded="false"
+            spellcheck="false"
+          />
+          <button id="geocoder-clear" type="button" aria-label="Clear place search" hidden>×</button>
+        </form>
+        <div id="geocoder-status" role="status" aria-live="polite"></div>
+        <ul id="geocoder-results" role="listbox" aria-label="Place search results" hidden></ul>
+      </section>
+
+      <section id="condition-panel" class="liquid-glass-panel" aria-live="polite">
+        <span class="liquid-glass-layer liquid-glass-bend" aria-hidden="true"></span>
+        <span class="liquid-glass-layer liquid-glass-face" aria-hidden="true"></span>
+        <span class="liquid-glass-layer liquid-glass-edge" aria-hidden="true"></span>
         <div class="panel-header">
           <span class="panel-eyebrow">Ignition target</span>
           <span class="panel-index">IGN—01</span>
@@ -74,7 +108,10 @@
         <span id="view-mode-toggle-label">3D</span>
       </button>
 
-      <section id="simulation-panel" aria-label="Fire simulation controls">
+      <section id="simulation-panel" class="liquid-glass-panel" aria-label="Fire simulation controls">
+        <span class="liquid-glass-layer liquid-glass-bend" aria-hidden="true"></span>
+        <span class="liquid-glass-layer liquid-glass-face" aria-hidden="true"></span>
+        <span class="liquid-glass-layer liquid-glass-edge" aria-hidden="true"></span>
         <div class="panel-header compact">
           <span class="panel-eyebrow">Scenario controls</span>
           <span class="panel-index">SIM—01</span>

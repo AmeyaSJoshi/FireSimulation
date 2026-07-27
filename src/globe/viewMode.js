@@ -1,21 +1,14 @@
 import * as Cesium from 'cesium';
 
-// Single owner of the explicit 2D/3D mode. Nothing else may flip projection —
-// not altitude (globeLOD reads this instead of the camera height once a mode
-// is set explicitly), not a click (ignite framing reads .mode but never calls
-// setMode). The only writers are the toggle button and the 'v' shortcut.
+// This is deliberately a camera-mode switch, not scene.morphTo2D: Google
+// Photorealistic 3D Tiles do not render in Cesium's real 2D scene mode.
 const STORAGE_KEY = 'ignis:viewMode';
-
-const AERIAL_PITCH = Cesium.Math.toRadians(-55);
+const AERIAL_PITCH = Cesium.Math.toRadians(-45);
 const TOPDOWN_PITCH = Cesium.Math.toRadians(-90);
-const TOPDOWN_HEADING = 0;
 const TRANSITION_DURATION_S = 1.2;
-const MIN_HEIGHT_ABOVE_GROUND_M = 120;
-// Above this camera height, "preserve the current range" produces a
-// destination kilometers past the horizon (or behind the camera) once
-// combined with a steep pitch — clamp to a sane close-in framing instead.
-const RANGE_PRESERVE_MAX_HEIGHT_M = 100_000;
-const DEFAULT_RANGE_M = 2000;
+const MIN_RANGE_M = 120;
+const SATELLITE_URL =
+  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
 
 function readStoredMode() {
   try {
@@ -29,86 +22,281 @@ function persistMode(mode) {
   try {
     localStorage.setItem(STORAGE_KEY, mode);
   } catch {
-    // storage unavailable (private mode, quota) — mode still works this session
+    // Storage unavailable — the mode still works for this session.
   }
 }
 
-// Anchor for the tween, always resolved (never null): pickEllipsoid first —
-// it hits any point the camera is generally facing, unlike pickPosition/
-// globe.pick which need real depth geometry and can miss or land near the
-// horizon at high altitude. If the camera is tilted off the globe entirely
-// (looking at sky/space), fall back to the point straight below the camera
-// itself so there is always something to tween toward.
+function isUsablePosition(position) {
+  return position
+    && Number.isFinite(position.x)
+    && Number.isFinite(position.y)
+    && Number.isFinite(position.z);
+}
+
+// Pick the geometry actually visible at screen centre. An ellipsoid fallback
+// is intentionally forbidden: it ignores buildings and terrain and is the
+// reason the old toggle jumped to a different area at oblique angles.
 function resolveAnchor(viewer) {
-  const canvas = viewer.scene.canvas;
+  const { scene, camera } = viewer;
+  const canvas = scene.canvas;
   const center = new Cesium.Cartesian2(canvas.clientWidth / 2, canvas.clientHeight / 2);
-  const cartesian = viewer.camera.pickEllipsoid(center, viewer.scene.globe.ellipsoid) ?? null;
-  if (cartesian) {
-    const carto = Cesium.Cartographic.fromCartesian(cartesian);
-    return { latitude: carto.latitude, longitude: carto.longitude, groundHeightMeters: carto.height };
+
+  if (scene.pickPositionSupported) {
+    try {
+      const depthPosition = scene.pickPosition(center);
+      if (isUsablePosition(depthPosition)) return depthPosition;
+    } catch {
+      // Depth is not ready at this pixel; try the rendered tileset below.
+    }
   }
-  const cameraCarto = viewer.camera.positionCartographic;
-  return { latitude: cameraCarto.latitude, longitude: cameraCarto.longitude, groundHeightMeters: 0 };
+
+  try {
+    const ray = camera.getPickRay(center);
+    const hit = ray ? scene.pickFromRay(ray) : null;
+    if (isUsablePosition(hit?.position)) return hit.position;
+  } catch {
+    // Ray picking can fail while tiles are still streaming. Abort the toggle.
+  }
+
+  return null;
 }
 
-// Reuses googleTiles.js's flyNow geometry (terrain-relative height, camera
-// pulled back along the view ray) so the tween never dips underground.
-function animateToMode(viewer, mode) {
-  const anchor = resolveAnchor(viewer);
-  const pitch = mode === '2d' ? TOPDOWN_PITCH : AERIAL_PITCH;
-  const heading = mode === '2d' ? TOPDOWN_HEADING : viewer.camera.heading;
+function findTilesets(viewer) {
+  const matches = [];
+  const primitives = viewer.scene.primitives;
+  for (let i = 0; i < primitives.length; i += 1) {
+    const primitive = primitives.get(i);
+    if (primitive instanceof Cesium.Cesium3DTileset) matches.push(primitive);
+  }
+  return matches;
+}
 
-  // Preserving the camera's current slant range only makes sense close in —
-  // from high above, that range combined with a steep pitch points the
-  // destination past the horizon. Above the threshold, use a fixed close-in
-  // framing over the anchor instead.
-  const cameraHeight = viewer.camera.positionCartographic.height;
-  let rangeMeters = DEFAULT_RANGE_M;
-  if (cameraHeight <= RANGE_PRESERVE_MAX_HEIGHT_M) {
-    const anchorCartesian = Cesium.Cartesian3.fromRadians(anchor.longitude, anchor.latitude, anchor.groundHeightMeters);
-    rangeMeters = Cesium.Cartesian3.distance(viewer.camera.position, anchorCartesian);
+function createSatelliteLayer(viewer) {
+  const provider = new Cesium.UrlTemplateImageryProvider({
+    url: SATELLITE_URL,
+    maximumLevel: 19,
+    credit: new Cesium.Credit(
+      '<a href="https://www.esri.com/" target="_blank">Tiles © Esri</a> — Sources: Esri, Maxar, Earthstar Geographics, and the GIS User Community'
+    )
+  });
+  const layer = viewer.imageryLayers.addImageryProvider(provider);
+  layer.show = false;
+  return layer;
+}
+
+function applySurfaceMode(viewer, satelliteLayer, mode) {
+  const tilesets = findTilesets(viewer);
+  const topDown = mode === '2d';
+  satelliteLayer.show = topDown;
+
+  if (topDown) {
+    for (const tileset of tilesets) tileset.show = false;
+    viewer.scene.globe.show = true;
+    viewer.imageryLayers.raiseToTop(satelliteLayer);
+  } else if (tilesets.length > 0) {
+    for (const tileset of tilesets) tileset.show = true;
+    viewer.scene.globe.show = false;
+  } else {
+    // No photoreal tiles available: retain the ordinary imagery globe.
+    viewer.scene.globe.show = true;
+  }
+  viewer.scene.requestRender();
+}
+
+function createVolumeModeGuard(viewer, getMode) {
+  const hiddenStates = new Map();
+
+  function sync() {
+    const primitives = viewer.scene.primitives;
+    if (getMode() === '2d') {
+      for (let i = 0; i < primitives.length; i += 1) {
+        const primitive = primitives.get(i);
+        if (!(primitive instanceof Cesium.ParticleSystem)) continue;
+        if (!hiddenStates.has(primitive)) hiddenStates.set(primitive, primitive.show);
+        primitive.show = false;
+      }
+      return;
+    }
+
+    if (hiddenStates.size > 0) {
+      for (const [primitive, wasShown] of hiddenStates) {
+        if (!primitive.isDestroyed?.()) primitive.show = wasShown;
+      }
+      hiddenStates.clear();
+    }
   }
 
-  const height = anchor.groundHeightMeters + Math.max(MIN_HEIGHT_ABOVE_GROUND_M, rangeMeters * Math.sin(-pitch));
-  const ground = rangeMeters * Math.cos(-pitch); // 0 at top-down: camera sits directly above the target
-  const metresPerDegreeLat = 111320;
-  const metresPerDegreeLon = metresPerDegreeLat * Math.max(Math.cos(anchor.latitude), 1e-6);
-  const latitude = Cesium.Math.toDegrees(anchor.latitude);
-  const longitude = Cesium.Math.toDegrees(anchor.longitude);
+  // fireLOD registers its preRender listener after initViewMode. Register this
+  // guard on the next task so it runs after fireLOD and wins in top-down mode.
+  let removeListener = null;
+  setTimeout(() => {
+    const listener = viewer.scene.preRender.addEventListener(sync);
+    removeListener = () => viewer.scene.preRender.removeEventListener(listener);
+    sync();
+  }, 0);
 
-  const destination = Cesium.Cartesian3.fromDegrees(
-    longitude - (ground * Math.sin(heading)) / metresPerDegreeLon,
-    latitude - (ground * Math.cos(heading)) / metresPerDegreeLat,
-    height
+  return {
+    sync,
+    destroy() {
+      removeListener?.();
+      removeListener = null;
+      for (const [primitive, wasShown] of hiddenStates) {
+        if (!primitive.isDestroyed?.()) primitive.show = wasShown;
+      }
+      hiddenStates.clear();
+    }
+  };
+}
+
+function offsetFromHeadingPitchRange(heading, pitch, rangeMeters) {
+  const adjustedHeading = Cesium.Math.zeroToTwoPi(heading) - Cesium.Math.PI_OVER_TWO;
+  const pitchRotation = Cesium.Quaternion.fromAxisAngle(
+    Cesium.Cartesian3.UNIT_Y,
+    -pitch,
+    new Cesium.Quaternion()
+  );
+  const headingRotation = Cesium.Quaternion.fromAxisAngle(
+    Cesium.Cartesian3.UNIT_Z,
+    -adjustedHeading,
+    new Cesium.Quaternion()
+  );
+  const rotation = Cesium.Quaternion.multiply(
+    headingRotation,
+    pitchRotation,
+    new Cesium.Quaternion()
+  );
+  const matrix = Cesium.Matrix3.fromQuaternion(rotation, new Cesium.Matrix3());
+  const offset = Cesium.Matrix3.multiplyByVector(
+    matrix,
+    Cesium.Cartesian3.UNIT_X,
+    new Cesium.Cartesian3()
+  );
+  Cesium.Cartesian3.negate(offset, offset);
+  return Cesium.Cartesian3.multiplyByScalar(offset, rangeMeters, offset);
+}
+
+function flightFrameForAnchor(anchor, heading, pitch, rangeMeters) {
+  // Match Cesium's HeadingPitchRange geometry, then supply world-space
+  // direction/up to flyTo. Unlike destination + HPR at globe-scale ranges,
+  // this always aims at the original anchor even when the destination has a
+  // very different local tangent frame.
+  const enu = Cesium.Transforms.eastNorthUpToFixedFrame(anchor);
+  const localOffset = offsetFromHeadingPitchRange(heading, pitch, rangeMeters);
+  const destination = Cesium.Matrix4.multiplyByPoint(
+    enu,
+    localOffset,
+    new Cesium.Cartesian3()
+  );
+  const direction = Cesium.Cartesian3.normalize(
+    Cesium.Cartesian3.subtract(anchor, destination, new Cesium.Cartesian3()),
+    new Cesium.Cartesian3()
+  );
+  const up = Cesium.Matrix4.multiplyByPointAsVector(
+    enu,
+    Cesium.Cartesian3.UNIT_Z,
+    new Cesium.Cartesian3()
   );
 
-  viewer.camera.flyTo({
-    destination,
-    orientation: { heading, pitch, roll: 0 },
-    duration: TRANSITION_DURATION_S
+  if (1 - Math.abs(Cesium.Cartesian3.dot(direction, up)) < Cesium.Math.EPSILON6) {
+    const north = Cesium.Matrix4.multiplyByPointAsVector(
+      enu,
+      Cesium.Cartesian3.UNIT_Y,
+      new Cesium.Cartesian3()
+    );
+    const headingRotation = Cesium.Quaternion.fromAxisAngle(
+      direction,
+      heading,
+      new Cesium.Quaternion()
+    );
+    Cesium.Matrix3.multiplyByVector(
+      Cesium.Matrix3.fromQuaternion(headingRotation, new Cesium.Matrix3()),
+      north,
+      up
+    );
+  } else {
+    const right = Cesium.Cartesian3.cross(direction, up, new Cesium.Cartesian3());
+    Cesium.Cartesian3.cross(right, direction, up);
+    Cesium.Cartesian3.normalize(up, up);
+  }
+
+  return { destination, direction, up };
+}
+
+function flyToMode(viewer, anchor, heading, pitch) {
+  const rangeMeters = Math.max(
+    MIN_RANGE_M,
+    Cesium.Cartesian3.distance(viewer.camera.positionWC, anchor)
+  );
+  const frame = flightFrameForAnchor(anchor, heading, pitch, rangeMeters);
+
+  return new Promise((resolve) => {
+    viewer.camera.flyTo({
+      destination: frame.destination,
+      orientation: { direction: frame.direction, up: frame.up },
+      duration: TRANSITION_DURATION_S,
+      easingFunction: Cesium.EasingFunction.QUADRATIC_IN_OUT,
+      complete: () => resolve(true),
+      cancel: () => resolve(false)
+    });
   });
 }
 
 export function initViewMode({ viewer }) {
   let mode = readStoredMode();
+  let transitionInProgress = false;
   const listeners = new Set();
+  const toggleButton = document.querySelector('#view-mode-toggle');
+  const satelliteLayer = createSatelliteLayer(viewer);
 
-  function setMode(nextMode) {
-    if (nextMode !== '2d' && nextMode !== '3d') return;
-    if (nextMode === mode) return;
+  viewer.scene.completeMorphOnUserInput = false;
+  applySurfaceMode(viewer, satelliteLayer, mode);
+  const volumeGuard = createVolumeModeGuard(viewer, () => mode);
+
+  function setTransitioning(next) {
+    transitionInProgress = next;
+    if (!toggleButton) return;
+    toggleButton.disabled = next;
+    toggleButton.setAttribute('aria-busy', String(next));
+  }
+
+  async function setMode(nextMode) {
+    if (nextMode !== '2d' && nextMode !== '3d') return false;
+    if (nextMode === mode || transitionInProgress) return false;
+
+    setTransitioning(true);
+    const anchor = resolveAnchor(viewer);
+    if (!anchor) {
+      setTransitioning(false);
+      return false;
+    }
+
+    const heading = viewer.camera.heading;
+    const pitch = nextMode === '2d' ? TOPDOWN_PITCH : AERIAL_PITCH;
     mode = nextMode;
     persistMode(mode);
-    animateToMode(viewer, mode);
-    listeners.forEach((cb) => cb(mode));
+    applySurfaceMode(viewer, satelliteLayer, mode);
+    volumeGuard.sync();
+    listeners.forEach((callback) => callback(mode));
+
+    try {
+      return await flyToMode(viewer, anchor, heading, pitch);
+    } finally {
+      setTransitioning(false);
+    }
   }
 
   return {
     get mode() { return mode; },
+    get transitionInProgress() { return transitionInProgress; },
     setMode,
-    toggle() { setMode(mode === '3d' ? '2d' : '3d'); },
-    onChange(cb) {
-      listeners.add(cb);
-      return () => listeners.delete(cb);
+    toggle() { return setMode(mode === '3d' ? '2d' : '3d'); },
+    onChange(callback) {
+      listeners.add(callback);
+      return () => listeners.delete(callback);
+    },
+    destroy() {
+      volumeGuard.destroy();
+      viewer.imageryLayers.remove(satelliteLayer, true);
     }
   };
 }

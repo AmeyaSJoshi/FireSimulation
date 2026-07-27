@@ -54,6 +54,7 @@ import { createFireLOD } from './globe/fireLOD.js';
 import { VISUAL_CELL_SCALE } from './globe/fireOverlay.js';
 import { initGlobeLOD } from './globe/globeLOD.js';
 import { initViewMode } from './globe/viewMode.js';
+import { initGeocoder } from './globe/geocoder.js';
 import './styles.css';
 
 // ─────────────────────────────────────────────────────────────
@@ -225,6 +226,8 @@ let cesiumGlobe = null;
 let globeLOD = null;
 let viewMode = null;
 let fireDrape = null;
+let geocoder = null;
+let displayedCoordinates = null;
 // P3: fire is draped on the Cesium globe in place; no camera cut.
 const DRAPE_ON_GLOBE = true;
 
@@ -915,6 +918,22 @@ canvas.style.display = 'none';
 try {
   cesiumGlobe = initCesiumGlobe();
   viewMode = initViewMode({ viewer: cesiumGlobe.viewer });
+  geocoder = initGeocoder({
+    viewer: cesiumGlobe.viewer,
+    viewMode,
+    onSelect: (result) => {
+      updateConditionPanel(
+        { latitude: result.latitude, longitude: result.longitude },
+        null,
+        {
+          locationLabel: result.label,
+          mode: 'waiting',
+          status: 'Search centered · click the globe to ignite'
+        }
+      );
+    },
+    onPlaceResolved: (result) => applyResolvedPlaceName(result)
+  });
   // P5: altitude-gated photoreal-tiles <-> shaded terrain globe swap.
   globeLOD = initGlobeLOD(cesiumGlobe.viewer, cesiumGlobe.tilesetPromise, () => viewMode.mode);
   // P6: same flat overlay as before, plus volumetric flames up close.
@@ -922,7 +941,7 @@ try {
   globeReady = true;
   initViewModeToggle(viewMode);
   if (import.meta.env.DEV) {
-    window.__ignis = { viewer: cesiumGlobe.viewer, fireDrape, globe: cesiumGlobe, globeLOD, viewMode };
+    window.__ignis = { viewer: cesiumGlobe.viewer, fireDrape, globe: cesiumGlobe, globeLOD, viewMode, geocoder };
   }
   cesiumGlobe.onGlobeClick(({ lat, lon, groundHeightMeters }) => {
     handleGlobeClick(lat, lon, groundHeightMeters);
@@ -957,6 +976,11 @@ function handleGlobeClick(lat, lon, groundHeightMeters = 0) {
   const isOcean = terrainSampler ? terrainSampler.isWaterAtLatLon(lat, lon) : null;
 
   updateConditionPanel(coordinates, isOcean);
+  geocoder?.reverse(lat, lon)
+    .then((place) => {
+      if (place) applyResolvedPlaceName({ ...coordinates, ...place, source: 'click' });
+    })
+    .catch(() => { /* Existing coarse location label remains the fallback. */ });
 
   // The coarse visual water map is advisory for Cesium. The Jac landscape
   // adapter resolves the actual 10 m fuel field and remains authoritative.
@@ -1200,14 +1224,26 @@ function startDrapePlayback(result) {
   fireDrape?.play();
 }
 
-function updateConditionPanel(coordinates, isOcean) {
-  locationValue.textContent = formatLocationLabel(coordinates.latitude, coordinates.longitude, isOcean);
+function sameDisplayedLocation(coordinates) {
+  return displayedCoordinates
+    && Math.abs(displayedCoordinates.latitude - coordinates.latitude) < 1e-6
+    && Math.abs(displayedCoordinates.longitude - coordinates.longitude) < 1e-6;
+}
+
+function applyResolvedPlaceName(result) {
+  if (result?.label && sameDisplayedLocation(result)) locationValue.textContent = result.label;
+}
+
+function updateConditionPanel(coordinates, isOcean, options = {}) {
+  displayedCoordinates = { latitude: coordinates.latitude, longitude: coordinates.longitude };
+  locationValue.textContent = options.locationLabel
+    || formatLocationLabel(coordinates.latitude, coordinates.longitude, isOcean);
   latitudeValue.textContent = formatCoord(coordinates.latitude, 'lat');
   longitudeValue.textContent = formatCoord(coordinates.longitude, 'lon');
   latitudeValue.classList.remove('placeholder');
   longitudeValue.classList.remove('placeholder');
-  panelStatus.dataset.mode = 'armed';
-  statusText.textContent = 'Location armed · ignition ready';
+  panelStatus.dataset.mode = options.mode || 'armed';
+  statusText.textContent = options.status || 'Location armed · ignition ready';
 }
 
 function formatCoord(value, axis) {
