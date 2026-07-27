@@ -36,6 +36,12 @@ export async function addGooglePhotorealisticTiles(viewer) {
 
 // Tilted aerial framing (reference look), not top-down.
 export const AERIAL_PITCH_RADIANS = Cesium.Math.toRadians(-55);
+const AERIAL_HEADING_RADIANS = Cesium.Math.toRadians(30);
+
+// Locked top-down pitch used by 2D view mode. North-up heading — unlike the
+// tilted aerial framing, there is no "reference look" rotation to preserve.
+export const TOPDOWN_PITCH_RADIANS = Cesium.Math.toRadians(-90);
+const TOPDOWN_HEADING_RADIANS = 0;
 
 // Altitude above which the camera is considered "far" and gets pulled down
 // toward the click. Below it, the user already picked what they were looking
@@ -43,7 +49,16 @@ export const AERIAL_PITCH_RADIANS = Cesium.Math.toRadians(-55);
 // move on top of an already-correct pick.
 const FAR_ALTITUDE_METERS = 2000;
 
-export function flyToAerial(viewer, { latitude, longitude, groundHeightMeters = 0, rangeMeters = 900, duration = 1.5 }) {
+export function flyToAerial(viewer, opts) {
+  flyToFramed(viewer, { ...opts, pitch: AERIAL_PITCH_RADIANS, heading: AERIAL_HEADING_RADIANS });
+}
+
+// Same framing math as flyToAerial, pitch locked to top-down for 2D mode.
+export function flyToTopDown(viewer, opts) {
+  flyToFramed(viewer, { ...opts, pitch: TOPDOWN_PITCH_RADIANS, heading: TOPDOWN_HEADING_RADIANS });
+}
+
+function flyToFramed(viewer, { latitude, longitude, groundHeightMeters = 0, rangeMeters = 900, duration = 1.5, pitch, heading }) {
   if (viewer.camera.positionCartographic.height <= FAR_ALTITUDE_METERS) return;
   // Cesium cancels an in-progress camera flight when it sees user input, and
   // callers start this from inside the click handler — the trailing mouse-up
@@ -52,7 +67,7 @@ export function flyToAerial(viewer, { latitude, longitude, groundHeightMeters = 
   //
   // setTimeout, not requestAnimationFrame: rAF is throttled to zero in
   // background/headless contexts, which silently dropped the flight entirely.
-  setTimeout(() => flyNow(viewer, { latitude, longitude, groundHeightMeters, rangeMeters, duration }), 0);
+  setTimeout(() => flyNow(viewer, { latitude, longitude, groundHeightMeters, rangeMeters, duration, pitch, heading }), 0);
 }
 
 // flyToBoundingSphere never tweened here (it silently no-ops unless duration
@@ -61,11 +76,10 @@ export function flyToAerial(viewer, { latitude, longitude, groundHeightMeters = 
 // height/destination MUST be terrain-relative: an absolute ellipsoid altitude
 // put the camera underground (or absurdly far above) on any hill/building,
 // since Google 3D Tiles terrain sits well off the WGS84 ellipsoid.
-function flyNow(viewer, { latitude, longitude, groundHeightMeters, rangeMeters, duration }) {
-  const pitch = AERIAL_PITCH_RADIANS;
-  const heading = Cesium.Math.toRadians(30);
+function flyNow(viewer, { latitude, longitude, groundHeightMeters, rangeMeters, duration, pitch, heading }) {
   // Pull the camera back along the view ray so the target sits centre-frame
-  // at the requested tilt.
+  // at the requested tilt. At pitch -90 (top-down) ground is 0 and the camera
+  // sits directly above the target — no lon/lat offset.
   const height = groundHeightMeters + Math.max(120, rangeMeters * Math.sin(-pitch));
   const ground = rangeMeters * Math.cos(-pitch);
   const metresPerDegreeLat = 111320;

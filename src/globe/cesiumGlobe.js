@@ -1,6 +1,6 @@
 import * as Cesium from 'cesium';
 import 'cesium/Build/Cesium/Widgets/widgets.css';
-import { addGooglePhotorealisticTiles, hasPhotorealisticTilesKey, MINIMAL_VIEWER_CHROME, flyToAerial } from './googleTiles.js';
+import { addGooglePhotorealisticTiles, hasPhotorealisticTilesKey, MINIMAL_VIEWER_CHROME, flyToAerial, flyToTopDown } from './googleTiles.js';
 
 const ION_TOKEN = import.meta.env.VITE_CESIUM_ION_TOKEN;
 const hasIonToken = typeof ION_TOKEN === 'string' && ION_TOKEN.trim().length > 0;
@@ -131,6 +131,7 @@ export function initCesiumGlobe() {
     viewer,
     tilesetPromise,
     flyToAerial: (opts) => flyToAerial(viewer, opts),
+    flyToTopDown: (opts) => flyToTopDown(viewer, opts),
     onGlobeClick(cb) {
       clickCallback = cb;
     },

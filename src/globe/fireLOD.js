@@ -231,6 +231,11 @@ export function createFireLOD(viewer) {
       });
     },
 
+    // PFIX7b dev diagnostic passthrough — see fireOverlay.js.
+    setDebugCells(enabled) {
+      base.setDebugCells(enabled);
+    },
+
     clear() {
       base.clear();
       if (removeListener) removeListener();

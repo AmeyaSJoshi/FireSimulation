@@ -52,6 +52,7 @@ import { MAX_PROPAGATION_MINUTES, runFromClick } from './sim/runFromClick.js';
 import { createFireLOD } from './globe/fireLOD.js';
 import { VISUAL_CELL_SCALE } from './globe/fireOverlay.js';
 import { initGlobeLOD } from './globe/globeLOD.js';
+import { initViewMode } from './globe/viewMode.js';
 import './styles.css';
 
 // ─────────────────────────────────────────────────────────────
@@ -59,6 +60,8 @@ import './styles.css';
 // ─────────────────────────────────────────────────────────────
 const canvas = document.querySelector('#scene');
 const loadingEl = document.querySelector('#loading');
+const viewModeToggle = document.querySelector('#view-mode-toggle');
+const viewModeToggleLabel = document.querySelector('#view-mode-toggle-label');
 const locationValue = document.querySelector('#location-value');
 const latitudeValue = document.querySelector('#latitude-value');
 const longitudeValue = document.querySelector('#longitude-value');
@@ -213,6 +216,7 @@ let globeReady = false;
 let pickedCoordinates = null;
 let cesiumGlobe = null;
 let globeLOD = null;
+let viewMode = null;
 let fireDrape = null;
 // P3: fire is draped on the Cesium globe in place; no camera cut.
 const DRAPE_ON_GLOBE = true;
@@ -867,15 +871,54 @@ function loadImageElement(url) {
 }
 loadLandCoverSource();
 
+// View mode (2D/3D) UI — the module owns the state; this just reflects it
+// and forwards the button/shortcut. No click-to-ignite path calls setMode.
+function renderViewModeToggle(mode) {
+  if (!viewModeToggle || !viewModeToggleLabel) return;
+  // Label = current state ("3D" while in 3D); tooltip/aria-label = the verb.
+  const current = mode === '2d' ? '2D' : '3D';
+  const switchTo = mode === '2d' ? '3D' : '2D';
+  viewModeToggleLabel.textContent = current;
+  viewModeToggle.title = `Switch to ${switchTo} (V)`;
+  viewModeToggle.setAttribute('aria-label', `Switch to ${switchTo} view`);
+  viewModeToggle.setAttribute('aria-pressed', String(mode === '2d'));
+}
+
+function initViewModeToggle(mode) {
+  renderViewModeToggle(mode.mode);
+  mode.onChange(renderViewModeToggle);
+  viewModeToggle?.addEventListener('click', () => mode.toggle());
+  window.addEventListener('keydown', (event) => {
+    if (event.key !== 'v' && event.key !== 'V') return;
+    const target = event.target;
+    const isTyping = target instanceof HTMLElement
+      && (target.tagName === 'INPUT' || target.tagName === 'SELECT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
+    if (isTyping) return;
+    mode.toggle();
+  });
+}
+
+// Picks the pitch/heading for the current view mode; DRAPE_ON_GLOBE call
+// sites use this instead of cesiumGlobe.flyToAerial directly so ignite framing
+// never fights the explicit 2D/3D choice.
+function flyToFramed(opts) {
+  const flier = viewMode?.mode === '2d' ? cesiumGlobe?.flyToTopDown : cesiumGlobe?.flyToAerial;
+  flier?.(opts);
+}
+
 canvas.style.display = 'none';
 try {
   cesiumGlobe = initCesiumGlobe();
+  // P-VIEW: explicit 2D/3D mode, persisted. globeLOD's altitude-based swap
+  // below only applies within 3D — 2D always forces terrain+imagery.
+  viewMode = initViewMode({ viewer: cesiumGlobe.viewer });
   // P5: altitude-gated photoreal-tiles <-> shaded terrain globe swap.
-  globeLOD = initGlobeLOD(cesiumGlobe.viewer, cesiumGlobe.tilesetPromise);
+  globeLOD = initGlobeLOD(cesiumGlobe.viewer, cesiumGlobe.tilesetPromise, () => viewMode.mode);
   // P6: same flat overlay as before, plus volumetric flames up close.
   fireDrape = createFireLOD(cesiumGlobe.viewer);
   globeReady = true;
-  if (import.meta.env.DEV) window.__ignis = { viewer: cesiumGlobe.viewer, fireDrape, globe: cesiumGlobe, globeLOD };
+  initViewModeToggle(viewMode);
+  if (import.meta.env.DEV) window.__ignis = { viewer: cesiumGlobe.viewer, fireDrape, globe: cesiumGlobe, globeLOD, viewMode };
   cesiumGlobe.onGlobeClick(({ lat, lon, groundHeightMeters }) => handleGlobeClick(lat, lon, groundHeightMeters));
   cesiumGlobe.onPickRefused((message) => {
     resetFireSimulation();
@@ -969,7 +1012,7 @@ function handleGlobeClick(lat, lon, groundHeightMeters = 0) {
   // Tilted aerial framing, fired immediately on click. This must NOT wait on
   // runFromClick — that blocks on an Overpass round trip, so the camera would
   // sit top-down for seconds and never move at all if the fetch rejects.
-  if (DRAPE_ON_GLOBE) cesiumGlobe?.flyToAerial({ latitude: lat, longitude: lon, groundHeightMeters });
+  if (DRAPE_ON_GLOBE) flyToFramed({ latitude: lat, longitude: lon, groundHeightMeters });
   startFireSimulation(coordinates);
 
   // P3: real WorldCover + OSM ignition, draped onto the globe in place. The
@@ -1051,7 +1094,7 @@ function frameBurnExtent(result, groundHeightMeters) {
   const diagonalMeters = Math.hypot(widthMeters, heightMeters);
   const rangeMeters = Math.max(120, diagonalMeters * 1.3); // ~30% padding, 120m floor
 
-  cesiumGlobe?.flyToAerial({
+  flyToFramed({
     latitude: centerLat,
     longitude: centerLon,
     groundHeightMeters,

@@ -509,6 +509,45 @@ canvas#scene:active {
 }
 
 /* ─────────────────────────────────────────────────────────────
+   View mode toggle (2D/3D) — floats bottom-right, left of the scenario
+   panel (which owns right:22/bottom:22 down that whole edge) so it never
+   sits under it, and above where a zoom control stack would sit.
+   ───────────────────────────────────────────────────────────── */
+#view-mode-toggle {
+  position: fixed;
+  right: 306px;
+  bottom: 22px;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 16px;
+  color: var(--ink-mid);
+  font: 500 var(--text-2xs)/1 var(--ui-mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  background: var(--panel-surface);
+  border: var(--hairline-w) solid var(--panel-border-strong);
+  border-radius: 999px;
+  backdrop-filter: blur(20px) saturate(130%);
+  -webkit-backdrop-filter: blur(20px) saturate(130%);
+  box-shadow: 0 20px 60px -20px rgba(0, 0, 0, 0.8), 0 1px 0 0 rgba(255, 236, 196, 0.06) inset;
+  cursor: pointer;
+  transition: color var(--dur-med) var(--ease-out), border-color var(--dur-med) var(--ease-out);
+}
+
+#view-mode-toggle:hover {
+  color: var(--ink-hi);
+  border-color: rgba(255, 236, 196, 0.3);
+}
+
+#view-mode-toggle .view-mode-icon {
+  width: 13px;
+  height: 13px;
+  color: var(--ember-hot);
+}
+
+/* ─────────────────────────────────────────────────────────────
    Scenario controls panel
    ───────────────────────────────────────────────────────────── */
 #simulation-panel {
