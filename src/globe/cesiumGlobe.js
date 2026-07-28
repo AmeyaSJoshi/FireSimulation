@@ -1,5 +1,6 @@
 import * as Cesium from 'cesium';
 import 'cesium/Build/Cesium/Widgets/widgets.css';
+import { initCameraControls } from './cameraControls.js';
 import { addGooglePhotorealisticTiles, hasPhotorealisticTilesKey, MINIMAL_VIEWER_CHROME, flyToAerial, flyToTopDown } from './googleTiles.js';
 
 const ION_TOKEN = import.meta.env.VITE_CESIUM_ION_TOKEN;
@@ -66,6 +67,7 @@ export function initCesiumGlobe() {
     console.warn('[cesiumGlobe] VITE_CESIUM_ION_TOKEN is not set — using OSM imagery + flat ellipsoid terrain as a fallback. Set the token in .env for satellite imagery and real terrain.');
   }
   viewer.scene.globe.depthTestAgainstTerrain = true;
+  const cameraControls = initCameraControls(viewer);
 
   let clickCallback = null;
   let pickRefusedCallback = null;
@@ -168,6 +170,7 @@ export function initCesiumGlobe() {
 
   return {
     viewer,
+    cameraControls,
     tilesetPromise,
     flyToAerial: (opts) => flyToAerial(viewer, opts),
     flyToTopDown: (opts) => flyToTopDown(viewer, opts),

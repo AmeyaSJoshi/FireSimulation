@@ -918,6 +918,9 @@ canvas.style.display = 'none';
 try {
   cesiumGlobe = initCesiumGlobe();
   viewMode = initViewMode({ viewer: cesiumGlobe.viewer });
+  // Camera-feel contract follows the 2D/3D toggle (tilt off + pitch lock in 2D).
+  cesiumGlobe.cameraControls?.setMode(viewMode.mode);
+  viewMode.onChange((nextMode) => cesiumGlobe.cameraControls?.setMode(nextMode));
   geocoder = initGeocoder({
     viewer: cesiumGlobe.viewer,
     viewMode,
