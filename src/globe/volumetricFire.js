@@ -40,7 +40,7 @@ const FRONT_WINDOW_MINUTES = 8.0;
 // shared one viewer.
 let stageCounter = 0;
 
-function buildArrivalTexture({ gridSize, arrivalMinutes }) {
+function buildArrivalTexture({ gridSize, arrivalMinutes, terrainHeights, groundBase, groundSpan }) {
   const canvas = document.createElement('canvas');
   canvas.width = gridSize;
   canvas.height = gridSize;
@@ -50,6 +50,11 @@ function buildArrivalTexture({ gridSize, arrivalMinutes }) {
   for (let i = 0; i < arrivalMinutes.length; i += 1) {
     const arrival = arrivalMinutes[i];
     const o = i * 4;
+    // B: per-cell ground height above the box base, for ALL cells — the
+    // shader needs terrain under never-burn cells too, so bilinear ground
+    // stays sane at burn/non-burn boundaries.
+    const cellGround = Number.isFinite(terrainHeights?.[i]) ? terrainHeights[i] : groundBase;
+    data[o + 2] = Math.min(255, Math.max(0, Math.round(((cellGround - groundBase) / groundSpan) * 255)));
     if (!Number.isFinite(arrival)) {
       data[o + 3] = 0;
       continue;
@@ -57,7 +62,6 @@ function buildArrivalTexture({ gridSize, arrivalMinutes }) {
     const encoded = Math.min(65535, Math.max(0, Math.round(arrival * ARRIVAL_ENCODE_SCALE)));
     data[o] = encoded & 0xff;
     data[o + 1] = (encoded >> 8) & 0xff;
-    data[o + 2] = 0;
     data[o + 3] = 255;
   }
   ctx.putImageData(image, 0, 0);
@@ -79,6 +83,7 @@ uniform vec3 uBoxEastEC;
 uniform vec3 uBoxNorthEC;
 uniform vec3 uBoxUpEC;
 uniform vec3 uBoxHalfExtents; // metres along (east, north, up)
+uniform float uGroundSpan;    // metres of terrain relief encoded in B
 
 const float NEVER_BURNS = 1.0e6;
 const float FRONT_WINDOW = ${FRONT_WINDOW_MINUTES.toFixed(1)};
@@ -87,6 +92,32 @@ const int STEPS = ${MARCH_STEPS};
 float decodeArrival(vec4 texel) {
   if (texel.a < 0.5) return NEVER_BURNS;
   return (texel.r * 255.0 + texel.g * 255.0 * 256.0) / ${ARRIVAL_ENCODE_SCALE}.0;
+}
+
+// Manual 4-tap bilinear, decoding each texel FIRST and interpolating the
+// decoded scalars — the same pattern fireOverlay.js uses. A single NEAREST
+// tap made every 10 m cell a hard-edged prism: the checkerboard columns.
+// Ground (B) interpolates too, so flame bases follow the hillside smoothly.
+void sampleField(vec2 uv, out float arrival, out float ground) {
+  vec2 ts = vec2(textureSize(uArrivalMap, 0));
+  vec2 halfTexel = 0.5 / ts;
+  vec2 f = clamp(uv, halfTexel, 1.0 - halfTexel) * ts - 0.5;
+  vec2 base = floor(f);
+  vec2 fr = f - base;
+  vec2 c00 = clamp((base + vec2(0.5, 0.5)) / ts, halfTexel, 1.0 - halfTexel);
+  vec2 c10 = clamp((base + vec2(1.5, 0.5)) / ts, halfTexel, 1.0 - halfTexel);
+  vec2 c01 = clamp((base + vec2(0.5, 1.5)) / ts, halfTexel, 1.0 - halfTexel);
+  vec2 c11 = clamp((base + vec2(1.5, 1.5)) / ts, halfTexel, 1.0 - halfTexel);
+  vec4 t00 = texture(uArrivalMap, c00);
+  vec4 t10 = texture(uArrivalMap, c10);
+  vec4 t01 = texture(uArrivalMap, c01);
+  vec4 t11 = texture(uArrivalMap, c11);
+  float a0 = mix(decodeArrival(t00), decodeArrival(t10), fr.x);
+  float a1 = mix(decodeArrival(t01), decodeArrival(t11), fr.x);
+  arrival = mix(a0, a1, fr.y);
+  float g0 = mix(t00.b, t10.b, fr.x);
+  float g1 = mix(t01.b, t11.b, fr.x);
+  ground = mix(g0, g1, fr.y) * uGroundSpan;
 }
 
 float hash13(vec3 p) {
@@ -198,17 +229,28 @@ void main() {
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) continue;
 
     // Arrival canvas row 0 is north; rectangle v runs south->north.
-    float arrival = decodeArrival(texture(uArrivalMap, vec2(uv.x, 1.0 - uv.y)));
+    // Bilinear-decoded: near a never-burns neighbour the interpolated arrival
+    // climbs toward NEVER_BURNS, so the flame edge SHRINKS smoothly instead
+    // of snapping off at the cell border.
+    float arrival;
+    float cellGround;
+    sampleField(vec2(uv.x, 1.0 - uv.y), arrival, cellGround);
     if (arrival > uTime) continue;
 
     float frontFalloff = 1.0 - smoothstep(0.0, FRONT_WINDOW, uTime - arrival);
     if (frontFalloff <= 0.001) continue;
 
+    // Height above the LOCAL terrain, not the box base — one flat base put
+    // uphill flames underground (depth-clipped into floating caps) and left
+    // downhill flames hovering on any slope.
+    float h = up - cellGround;
+    if (h < 0.0) continue;
+
     // WORLD-SPACE noise: built from the box's own east/north/up basis, so it
     // stays anchored to the ground as the camera orbits. Vertical scroll
     // makes the structure rise.
     vec3 worldish = vec3(east, north, up) + vec3(0.0, 0.0, -uTime * 2.0);
-    float density = exp(-up / 15.0) * fbm(worldish * 0.15) * frontFalloff;
+    float density = exp(-h / 15.0) * fbm(worldish * 0.15) * frontFalloff;
     density = max(density - 0.08, 0.0) * 2.2; // contrast floor carves wisps
     if (density <= 0.0) continue;
 
@@ -237,6 +279,7 @@ export function createVolumetricFire(viewer) {
   let enu = Cesium.Matrix4.IDENTITY.clone();
   let halfExtents = new Cesium.Cartesian3(1, 1, 1);
   let arrivalTexture = null;
+  let groundSpan = 1;
   let active = false;
 
   const scratchAxis = new Cesium.Cartesian4();
@@ -281,7 +324,8 @@ export function createVolumetricFire(viewer) {
         uBoxEastEC: () => axisToEye(0),
         uBoxNorthEC: () => axisToEye(1),
         uBoxUpEC: () => axisToEye(2),
-        uBoxHalfExtents: () => halfExtents
+        uBoxHalfExtents: () => halfExtents,
+        uGroundSpan: () => groundSpan
       }
     }));
     // Cesium's addEventListener returns a REMOVE FUNCTION, not the listener.
@@ -336,23 +380,34 @@ export function createVolumetricFire(viewer) {
     console.info('[volumetricFire] build · groundHeight', groundHeight.toFixed(1), 'm ·',
       Number.isFinite(result.groundHeightMeters) ? 'from ignition pick' : 'from sampleHeight');
 
+    // Relief-aware box: base at the LOWEST cell, top clearing the HIGHEST
+    // cell plus flame height. A fixed 40 m box centred on one height sliced
+    // through hillsides.
+    const heights = Array.isArray(result.terrainHeights) || ArrayBuffer.isView(result.terrainHeights)
+      ? Array.from(result.terrainHeights).filter(Number.isFinite)
+      : [];
+    const groundBase = heights.length > 0 ? Math.min(...heights) : groundHeight;
+    const groundTop = heights.length > 0 ? Math.max(...heights) : groundHeight;
+    groundSpan = Math.max(groundTop - groundBase, 1);
+
     const halfEast = Cesium.Cartesian3.distance(
-      Cesium.Cartesian3.fromDegrees(west, midLat, groundHeight),
-      Cesium.Cartesian3.fromDegrees(east, midLat, groundHeight)
+      Cesium.Cartesian3.fromDegrees(west, midLat, groundBase),
+      Cesium.Cartesian3.fromDegrees(east, midLat, groundBase)
     ) / 2;
     const halfNorth = Cesium.Cartesian3.distance(
-      Cesium.Cartesian3.fromDegrees(midLon, south, groundHeight),
-      Cesium.Cartesian3.fromDegrees(midLon, north, groundHeight)
+      Cesium.Cartesian3.fromDegrees(midLon, south, groundBase),
+      Cesium.Cartesian3.fromDegrees(midLon, north, groundBase)
     ) / 2;
-    const halfUp = BOX_HEIGHT_METERS / 2;
+    const halfUp = (groundSpan + BOX_HEIGHT_METERS) / 2;
 
     halfExtents = new Cesium.Cartesian3(halfEast, halfNorth, halfUp);
-    centreWC = Cesium.Cartesian3.fromDegrees(midLon, midLat, groundHeight + halfUp);
+    centreWC = Cesium.Cartesian3.fromDegrees(midLon, midLat, groundBase + halfUp);
     enu = Cesium.Transforms.eastNorthUpToFixedFrame(centreWC);
+
     if (arrivalTexture && !arrivalTexture.isDestroyed()) arrivalTexture.destroy();
     arrivalTexture = new Cesium.Texture({
       context: viewer.scene.context,
-      source: buildArrivalTexture({ gridSize, arrivalMinutes }),
+      source: buildArrivalTexture({ gridSize, arrivalMinutes, terrainHeights: result.terrainHeights, groundBase, groundSpan }),
       sampler: new Cesium.Sampler({
         minificationFilter: Cesium.TextureMinificationFilter.NEAREST,
         magnificationFilter: Cesium.TextureMagnificationFilter.NEAREST,

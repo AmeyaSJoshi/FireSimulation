@@ -1062,6 +1062,11 @@ function handleGlobeClick(lat, lon, groundHeightMeters = undefined) {
     result.groundHeightMeters = Number.isFinite(terrainGroundHeight)
       ? terrainGroundHeight
       : (Number.isFinite(groundHeightMeters) ? groundHeightMeters : undefined);
+    // Per-cell terrain for the volumetric fire. One centre height for the
+    // whole 640 m field was fine on flat ground and wrong on any hillside:
+    // uphill flames started underground (depth-clipped into floating caps),
+    // downhill flames hovered.
+    result.terrainHeights = scenario.context?.terrainHeights ?? null;
     const m = result.metrics;
     const fallbacks = scenario.provenance?.fallbacks ?? [];
     simulationReadout.textContent = fallbacks.length > 0
