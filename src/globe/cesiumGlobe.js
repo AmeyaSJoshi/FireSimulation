@@ -104,19 +104,47 @@ export function initCesiumGlobe() {
     const carto = Cesium.Cartographic.fromCartesian(cartesian);
 
     let sampledHeight = null;
-    // Diagnostic only — building sides/slopes legitimately disagree with a
-    // single sampleHeight() call at the same lon/lat, so this used to refuse
-    // real clicks. Log and proceed; never blocks the pick.
+    // Plausibility gate. A ±50 m rule was tried and removed because building
+    // sides and slopes legitimately disagree with a single sampleHeight() at
+    // the same lon/lat by tens of metres — it refused real clicks.
+    //
+    // But the failure it existed to catch is real and much larger: when the
+    // local 3D tiles have not streamed in, the depth buffer holds only distant
+    // coarse geometry, so pickPosition returns a point tens of kilometres away
+    // and sampleHeight returns a physically impossible height. Measured from
+    // 900 m altitude at -40 deg pitch, where ground is ~1.4 km away: picks came
+    // back 29-42 km out with sampleHeight at -22,726 m, and the click ignited
+    // 23 km from the cursor.
+    //
+    // The two cases are separated by orders of magnitude, so gate on physical
+    // impossibility rather than a tight tolerance: a building side never trips
+    // this, unloaded tiles always do.
+    const MAX_GROUND_ELEVATION_M = 9_000;   // above Everest
+    const MIN_GROUND_ELEVATION_M = -500;    // below the Dead Sea shore
+    const MAX_PICK_RANGE_M = 250_000;       // beyond any usable click range
+
+    const pickRangeMeters = Cesium.Cartesian3.distance(viewer.camera.positionWC, cartesian);
+    const impossibleHeight = carto.height < MIN_GROUND_ELEVATION_M
+      || carto.height > MAX_GROUND_ELEVATION_M;
+
     if (typeof viewer.scene.sampleHeight === 'function') {
       try {
         sampledHeight = viewer.scene.sampleHeight(carto);
-        if (Number.isFinite(sampledHeight) && Math.abs(sampledHeight - carto.height) > 50) {
-          console.info('[cesiumGlobe] picked height', carto.height.toFixed(1),
-            'm vs sampled', sampledHeight.toFixed(1), 'm (diagnostic only, not blocking) · strategy:', strategy);
-        }
       } catch {
-        // no pickable surface at this pixel for sampleHeight; nothing to log
+        sampledHeight = null; // nothing pickable at this pixel
       }
+    }
+    const impossibleSample = Number.isFinite(sampledHeight)
+      && (sampledHeight < MIN_GROUND_ELEVATION_M || sampledHeight > MAX_GROUND_ELEVATION_M);
+
+    if (impossibleHeight || impossibleSample || pickRangeMeters > MAX_PICK_RANGE_M) {
+      console.warn('[cesiumGlobe] click refused — implausible pick · height',
+        carto.height.toFixed(0), 'm · sampled',
+        Number.isFinite(sampledHeight) ? sampledHeight.toFixed(0) : 'n/a',
+        'm · range', Math.round(pickRangeMeters), 'm · strategy:', strategy,
+        '·', TILES_LOADING_MESSAGE);
+      pickRefusedCallback?.(TILES_LOADING_MESSAGE);
+      return;
     }
 
     // Low-detail Google tile depth can report a point far inside the WGS84
