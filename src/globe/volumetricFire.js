@@ -246,17 +246,35 @@ void main() {
     float h = up - cellGround;
     if (h < 0.0) continue;
 
+    // The box must NEVER be visible as geometry. Three fades kill its
+    // silhouette (which read as a standing rectangular slab):
+    //   lateral — density feathers to zero at the field's uv borders, so the
+    //             box side walls produce no vertical seams;
+    //   base    — a short ramp above the terrain line, so grazing views don't
+    //             paint a hard white ribbon along the ground;
+    //   top     — flames thin out well before the box lid.
+    float lateral = smoothstep(0.0, 0.05, uv.x) * smoothstep(1.0, 0.95, uv.x)
+      * smoothstep(0.0, 0.05, uv.y) * smoothstep(1.0, 0.95, uv.y);
+    float baseFade = smoothstep(0.0, 2.5, h);
+    float topFade = 1.0 - smoothstep(26.0, 40.0, h);
+
     // WORLD-SPACE noise: built from the box's own east/north/up basis, so it
     // stays anchored to the ground as the camera orbits. Vertical scroll
     // makes the structure rise.
     vec3 worldish = vec3(east, north, up) + vec3(0.0, 0.0, -uTime * 2.0);
-    float density = exp(-h / 15.0) * fbm(worldish * 0.15) * frontFalloff;
-    density = max(density - 0.08, 0.0) * 2.2; // contrast floor carves wisps
+    float density = exp(-h / 12.0) * fbm(worldish * 0.15) * frontFalloff
+      * lateral * baseFade * topFade;
+    // Higher contrast floor carves the sheet into distinct tongues.
+    density = max(density - 0.22, 0.0) * 2.2;
+    // Cap density so a grazing ray through hundreds of metres of near-ground
+    // layer saturates to a bounded value ACES can roll off, not blown white.
+    density = min(density, 1.1);
     if (density <= 0.0) continue;
 
-    // Denser => hotter; superlinear emission blows the core out bright.
-    vec3 emission = blackbody(clamp(density * 1.9, 0.0, 1.0))
-      * (density + 2.4 * density * density);
+    // Denser => hotter; superlinear emission kept gentle enough that only
+    // true cores reach the bloom threshold.
+    vec3 emission = blackbody(clamp(density * 1.6, 0.0, 1.0))
+      * (density + 1.6 * density * density);
 
     // Tuned for the HDR+ACES pipeline: the old 0.75 was compensating for a
     // clipping LDR target and read as muddy orange once values stopped
