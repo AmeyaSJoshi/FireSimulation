@@ -67,7 +67,7 @@ export function initCesiumGlobe() {
     console.warn('[cesiumGlobe] VITE_CESIUM_ION_TOKEN is not set — using OSM imagery + flat ellipsoid terrain as a fallback. Set the token in .env for satellite imagery and real terrain.');
   }
   viewer.scene.globe.depthTestAgainstTerrain = true;
-  const cameraControls = initCameraControls(viewer);
+  const cameraControls = initCameraControls(viewer, { getTileset: () => tileset });
 
   let clickCallback = null;
   let pickRefusedCallback = null;

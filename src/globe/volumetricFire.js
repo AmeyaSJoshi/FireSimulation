@@ -150,10 +150,25 @@ void main() {
   if (!intersectBox(ro, rd, t0, t1)) { out_FragColor = sceneColor; return; }
   t0 = max(t0, 0.0);
 
-  // Debug: solid magenta wherever the ray hits the box, BEFORE the depth
-  // clamp and any density work. Separates "is the box on screen at all"
-  // from "does the march produce anything" in one look.
-  if (uDebug > 0.5) { out_FragColor = vec4(1.0, 0.0, 1.0, 1.0); return; }
+  // Debug, BEFORE the depth clamp: magenta = ray hits the box AND at least
+  // one march sample passes the arrival gate (geometry AND decode good);
+  // dim blue = box hit but every sample culled by arrival (geometry good,
+  // decode/uv/texture wrong). One glance splits the two failure classes.
+  if (uDebug > 0.5) {
+    float dt0 = max(t0, 0.0);
+    float dStep = (t1 - dt0) / float(STEPS);
+    int passes = 0;
+    for (int i = 0; i < STEPS; i += 1) {
+      vec3 dp = ro + rd * (dt0 + (float(i) + 0.5) * dStep);
+      vec3 dd = dp - uBoxCenterEC;
+      vec2 duv = vec2(dot(dd, uBoxEastEC) / (2.0 * uBoxHalfExtents.x) + 0.5,
+                      dot(dd, uBoxNorthEC) / (2.0 * uBoxHalfExtents.y) + 0.5);
+      if (duv.x < 0.0 || duv.x > 1.0 || duv.y < 0.0 || duv.y > 1.0) continue;
+      if (decodeArrival(texture(uArrivalMap, vec2(duv.x, 1.0 - duv.y))) <= uTime) passes += 1;
+    }
+    out_FragColor = passes > 0 ? vec4(1.0, 0.0, 1.0, 1.0) : vec4(0.1, 0.15, 0.6, 1.0);
+    return;
+  }
 
   // Clamp the far end to scene depth so terrain and buildings in front of the
   // volume occlude it instead of fire drawing over them.
@@ -269,6 +284,14 @@ export function createVolumetricFire(viewer) {
         uBoxHalfExtents: () => halfExtents
       }
     }));
+    // Cesium's addEventListener returns a REMOVE FUNCTION, not the listener.
+    const removeCheck = viewer.scene.postRender.addEventListener(() => {
+      removeCheck();
+      const gl = viewer.scene.context._originalGLContext;
+      const glError = gl ? gl.getError() : 'no-gl';
+      console.info('[volumetricFire] stage', stage?.name, '· ready', stage?.ready,
+        '· glError', glError === 0 ? 'none' : glError);
+    });
   }
 
   function removeStage() {

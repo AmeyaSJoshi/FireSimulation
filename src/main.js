@@ -979,7 +979,7 @@ if (new URLSearchParams(window.location.search).get('launch') === '1') {
 // ─────────────────────────────────────────────────────────────
 // Selection
 // ─────────────────────────────────────────────────────────────
-function handleGlobeClick(lat, lon, groundHeightMeters = 0) {
+function handleGlobeClick(lat, lon, groundHeightMeters = undefined) {
   if (!globeReady) return;
   const coordinates = { latitude: lat, longitude: lon };
   const isOcean = terrainSampler ? terrainSampler.isWaterAtLatLon(lat, lon) : null;
@@ -1054,9 +1054,14 @@ function handleGlobeClick(lat, lon, groundHeightMeters = 0) {
     }
     const result = createDrapeResultFromScenario(scenario);
     const terrainGroundHeight = scenario.context?.terrainHeights?.[scenario.simulation.ignitionIndex];
+    // NO zero fallback. Zero is a position (the ellipsoid), not a default —
+    // it is finite, so it sailed through volumetricFire's Number.isFinite
+    // check, skipped its sampleHeight fallback and refuse-to-build path, and
+    // buried the box underground again. Leave undefined so the volume's own
+    // priority chain (pick -> sampleHeight -> refuse + console.error) runs.
     result.groundHeightMeters = Number.isFinite(terrainGroundHeight)
       ? terrainGroundHeight
-      : (Number.isFinite(groundHeightMeters) ? groundHeightMeters : 0);
+      : (Number.isFinite(groundHeightMeters) ? groundHeightMeters : undefined);
     const m = result.metrics;
     const fallbacks = scenario.provenance?.fallbacks ?? [];
     simulationReadout.textContent = fallbacks.length > 0
