@@ -33,15 +33,19 @@ export const CLOSE_ALTITUDE_M = 1_800;
 const MAX_VOLUMETRIC_CELLS = 48;
 const RENDER_DISTANCE_M = CLOSE_ALTITUDE_M;
 const UPDATE_THROTTLE_MS = 140;
-// Matches fireOverlay's active-front window: only the leading edge gets
-// volume, smouldering cells stay as the base layer's dim points.
-const FRONT_WINDOW_MINUTES = 8;
+// Street-altitude diagnosis (why the old flame sprites were invisible):
+// (1) they were gated to cells burned within the 8-min front window, so the
+// moment playback passed an area — or finished — every sprite vanished;
+// (2) the sprites were ~6 m wide, sub-pixel from any framing wide enough to
+// see the field. Smoke fixes both: it trails the front on a 5-min window
+// that follows uTime during replay, and its billows are 20-60 m.
+const SMOKE_WINDOW_MINUTES = 5;
+const EMBER_WINDOW_MINUTES = 2;
 const FLAME_LIFT_METERS = 3;
-const FLAME_LAYERS = Object.freeze([
-  { height: 0.0, scale: 1.15, scrollRate: 4.1, phase: 0.0, buoyancy: 5.5, curl: 1.15 },
-  { height: 4.5, scale: 0.88, scrollRate: 5.7, phase: 2.1, buoyancy: 6.8, curl: 1.45 },
-  { height: 9.0, scale: 0.64, scrollRate: 7.3, phase: 4.4, buoyancy: 8.0, curl: 1.75 }
-]);
+// Sparse subset: 1 in 3 recently-burned cells emits smoke. Every cell
+// smoking reads as a solid wall, not a fire.
+const SMOKE_CELL_STRIDE = 3;
+const SYSTEMS_PER_CELL = 2; // [smoke, ember]
 
 // RenderState validates against limits populated by Cesium's WebGL Context.
 // Building it at module import time runs before that context exists and throws
@@ -52,35 +56,29 @@ let additiveDepthTestState = null;
 const forceScratch = new Cesium.Cartesian3();
 const curlScratch = new Cesium.Cartesian3();
 
-function applyFlameForces(system, particle, dt) {
-  if (!system._flameUp) return;
+// Shared update: buoyancy along geodetic up, plus a horizontal drift matching
+// the scenario wind. The downwind lean is the single most recognizable fire
+// silhouette. Smoke additionally gets a slow curl so columns billow.
+function applyParticleForces(system, particle, dt) {
+  if (!system._pUp) return;
 
-  // Buoyancy always follows geodetic up from the cell's ENU frame.
-  Cesium.Cartesian3.multiplyByScalar(
-    system._flameUp,
-    system._flameBuoyancy * dt,
-    forceScratch
-  );
+  Cesium.Cartesian3.multiplyByScalar(system._pUp, system._pBuoyancy * dt, forceScratch);
   Cesium.Cartesian3.add(particle.velocity, forceScratch, particle.velocity);
 
-  // Two incommensurate waves make a cheap curl field. Each stacked layer has
-  // a different phase and scroll rate, so the silhouettes never move as one.
-  const phase = system._flamePhase
-    + particle.age * system._flameScrollRate
-    + (particle.position.x + particle.position.y + particle.position.z) * 0.00012;
-  Cesium.Cartesian3.multiplyByScalar(system._flameEast, Math.sin(phase), curlScratch);
-  Cesium.Cartesian3.multiplyByScalar(
-    system._flameNorth,
-    Math.cos(phase * 1.37 + system._flamePhase),
-    forceScratch
-  );
-  Cesium.Cartesian3.add(curlScratch, forceScratch, curlScratch);
-  Cesium.Cartesian3.multiplyByScalar(
-    curlScratch,
-    system._flameCurl * dt,
-    curlScratch
-  );
-  Cesium.Cartesian3.add(particle.velocity, curlScratch, particle.velocity);
+  if (system._pWind) {
+    Cesium.Cartesian3.multiplyByScalar(system._pWind, dt, forceScratch);
+    Cesium.Cartesian3.add(particle.velocity, forceScratch, particle.velocity);
+  }
+
+  if (system._pCurl > 0) {
+    const phase = system._pPhase + particle.age * 0.9
+      + (particle.position.x + particle.position.y + particle.position.z) * 0.00012;
+    Cesium.Cartesian3.multiplyByScalar(system._pEast, Math.sin(phase), curlScratch);
+    Cesium.Cartesian3.multiplyByScalar(system._pNorth, Math.cos(phase * 1.37), forceScratch);
+    Cesium.Cartesian3.add(curlScratch, forceScratch, curlScratch);
+    Cesium.Cartesian3.multiplyByScalar(curlScratch, system._pCurl * dt, curlScratch);
+    Cesium.Cartesian3.add(particle.velocity, curlScratch, particle.velocity);
+  }
 }
 
 function configureAdditiveParticleLayer(system) {
@@ -106,37 +104,59 @@ function flameScaleForFuel(fuelIndex) {
   return 1.0;                        // GR*/GS* grass
 }
 
-// Tall premultiplied-looking flame sprite. Runtime composition is additive,
-// so overlapping particles build a bright core instead of flat alpha cards.
-function makeParticleImage() {
+// Soft grey-brown puff. TRANSLUCENT composition (not additive): smoke blocks
+// light, it does not emit it. Darker at the base via startColor in ensurePool.
+function makeSmokeImage() {
   const canvas = document.createElement('canvas');
-  canvas.width = 48;
-  canvas.height = 96;
+  canvas.width = 64;
+  canvas.height = 64;
   const ctx = canvas.getContext('2d');
-  ctx.globalCompositeOperation = 'lighter';
+  const g = ctx.createRadialGradient(32, 32, 2, 32, 32, 32);
+  g.addColorStop(0, 'rgba(255,255,255,0.55)');
+  g.addColorStop(0.5, 'rgba(255,255,255,0.28)');
+  g.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 64, 64);
+  return canvas;
+}
 
-  const body = ctx.createRadialGradient(24, 67, 1, 24, 58, 30);
-  body.addColorStop(0, 'rgba(255,255,235,0.98)');
-  body.addColorStop(0.26, 'rgba(255,226,92,0.90)');
-  body.addColorStop(0.62, 'rgba(255,104,16,0.56)');
-  body.addColorStop(1, 'rgba(255,40,0,0)');
-  ctx.fillStyle = body;
-  ctx.fillRect(0, 20, 48, 76);
-
-  const tip = ctx.createRadialGradient(24, 42, 0, 24, 42, 23);
-  tip.addColorStop(0, 'rgba(255,242,150,0.72)');
-  tip.addColorStop(0.48, 'rgba(255,122,18,0.34)');
-  tip.addColorStop(1, 'rgba(255,50,0,0)');
-  ctx.fillStyle = tip;
-  ctx.fillRect(4, 2, 40, 64);
+// Tiny hot dot for embers — additive, so overlap builds brightness.
+function makeEmberImage() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 16;
+  canvas.height = 16;
+  const ctx = canvas.getContext('2d');
+  const g = ctx.createRadialGradient(8, 8, 0, 8, 8, 8);
+  g.addColorStop(0, 'rgba(255,240,200,1)');
+  g.addColorStop(0.4, 'rgba(255,150,40,0.8)');
+  g.addColorStop(1, 'rgba(255,60,0,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 16, 16);
   return canvas;
 }
 
 export function createFireLOD(viewer) {
   const base = createFireOverlay(viewer);
-  // Raymarched volume, flagged off by default (window.__ignis.volumetric).
+  // Raymarched volume (the flame element; enabled at startup by main.js).
   const volumetric = createVolumetricFire(viewer);
-  const particleImage = makeParticleImage();
+  const smokeImage = makeSmokeImage();
+  const emberImage = makeEmberImage();
+  // ENU wind drift (m/s^2-ish accel), rebuilt per show() from the UI sliders.
+  // Compass direction is where wind comes FROM; drift is toward FROM+180.
+  let windEastAccel = 0;
+  let windNorthAccel = 0;
+
+  function refreshWindFromSliders() {
+    const speedKmh = Number(document.querySelector('#wind-speed')?.value) || 0;
+    const directionDeg = Number(document.querySelector('#wind-direction')?.value) || 0;
+    // Slider 0 = live-weather mode; a gentle default lean still reads better
+    // than a perfectly vertical column, which never happens in reality.
+    const speedMs = speedKmh > 0 ? speedKmh / 3.6 : 2.2;
+    const towardRad = ((directionDeg + 180) * Math.PI) / 180;
+    const accel = Math.min(speedMs * 0.35, 6);
+    windEastAccel = Math.sin(towardRad) * accel;
+    windNorthAccel = Math.cos(towardRad) * accel;
+  }
 
   let result = null;
   let cellPositions = null;
@@ -149,36 +169,65 @@ export function createFireLOD(viewer) {
   function ensurePool() {
     if (pool.length > 0) return;
     for (let cell = 0; cell < MAX_VOLUMETRIC_CELLS; cell += 1) {
-      for (const layer of FLAME_LAYERS) {
-        let system;
-        system = new Cesium.ParticleSystem({
-          image: particleImage,
-          startColor: new Cesium.Color(1.0, 0.88, 0.38, 0.78),
-          endColor: new Cesium.Color(1.0, 0.08, 0.01, 0.0),
-          startScale: 0.72,
-          endScale: 2.35,
-          minimumParticleLife: 0.65,
-          maximumParticleLife: 1.5,
-          minimumSpeed: 2.8,
-          maximumSpeed: 7.5,
-          imageSize: new Cesium.Cartesian2(2.0 * VISUAL_CELL_SCALE, 4.0 * VISUAL_CELL_SCALE),
-          emissionRate: 18,
-          sizeInMeters: true,
-          loop: true,
-          modelMatrix: Cesium.Matrix4.IDENTITY,
-          emitterModelMatrix: Cesium.Matrix4.IDENTITY,
-          emitter: new Cesium.ConeEmitter(Cesium.Math.toRadians(13)),
-          updateCallback: (particle, dt) => applyFlameForces(system, particle, dt),
-          show: false
-        });
-        system._flameLayer = layer;
-        system._flameScrollRate = layer.scrollRate;
-        system._flamePhase = layer.phase + cell * 0.618;
-        system._flameBuoyancy = layer.buoyancy;
-        system._flameCurl = layer.curl;
-        viewer.scene.primitives.add(system);
-        pool.push(system);
-      }
+      // slot 0: smoke — large, soft, translucent, long-lived, slow.
+      let smoke;
+      smoke = new Cesium.ParticleSystem({
+        image: smokeImage,
+        // Grey-brown, darker at the base; lighter and thinner as it rises.
+        startColor: new Cesium.Color(0.23, 0.205, 0.185, 0.42),
+        endColor: new Cesium.Color(0.58, 0.57, 0.555, 0.0),
+        // Widen with age so the column billows instead of staying a tube.
+        startScale: 1.0,
+        endScale: 3.2,
+        minimumParticleLife: 15,
+        maximumParticleLife: 30,
+        minimumSpeed: 1.2,
+        maximumSpeed: 2.8,
+        imageSize: new Cesium.Cartesian2(20, 20), // 20m birth -> ~60m at end scale
+        emissionRate: 2.2,
+        sizeInMeters: true,
+        loop: true,
+        modelMatrix: Cesium.Matrix4.IDENTITY,
+        emitterModelMatrix: Cesium.Matrix4.IDENTITY,
+        emitter: new Cesium.ConeEmitter(Cesium.Math.toRadians(9)),
+        updateCallback: (particle, dt) => applyParticleForces(smoke, particle, dt),
+        show: false
+      });
+      smoke._pKind = 'smoke';
+      smoke._pBuoyancy = 2.6;
+      smoke._pCurl = 0.5;
+      smoke._pPhase = cell * 0.618;
+      viewer.scene.primitives.add(smoke);
+      pool.push(smoke);
+
+      // slot 1: embers — small, sparse, bright, short-lived, rising fast.
+      let ember;
+      ember = new Cesium.ParticleSystem({
+        image: emberImage,
+        startColor: new Cesium.Color(1.0, 0.85, 0.5, 0.95),
+        endColor: new Cesium.Color(1.0, 0.25, 0.02, 0.0),
+        startScale: 1.0,
+        endScale: 0.4,
+        minimumParticleLife: 0.5,
+        maximumParticleLife: 1.2,
+        minimumSpeed: 8,
+        maximumSpeed: 16,
+        imageSize: new Cesium.Cartesian2(0.8, 0.8),
+        emissionRate: 5,
+        sizeInMeters: true,
+        loop: true,
+        modelMatrix: Cesium.Matrix4.IDENTITY,
+        emitterModelMatrix: Cesium.Matrix4.IDENTITY,
+        emitter: new Cesium.ConeEmitter(Cesium.Math.toRadians(14)),
+        updateCallback: (particle, dt) => applyParticleForces(ember, particle, dt),
+        show: false
+      });
+      ember._pKind = 'ember';
+      ember._pBuoyancy = 9.0;
+      ember._pCurl = 0;
+      ember._pPhase = 0;
+      viewer.scene.primitives.add(ember);
+      pool.push(ember);
     }
   }
 
@@ -236,54 +285,57 @@ export function createFireLOD(viewer) {
       const arrival = arrivalMinutes[i];
       if (!Number.isFinite(arrival) || arrival > timeMinutes) continue;
       const age = timeMinutes - arrival;
-      if (age > FRONT_WINDOW_MINUTES) continue;
+      // Smoke trails the front: anything burned within the smoke window.
+      if (age > SMOKE_WINDOW_MINUTES) continue;
+      // Sparse subset — every cell smoking is a wall, not a fire.
+      if ((i * 2654435761 >>> 0) % SMOKE_CELL_STRIDE !== 0) continue;
 
       const position = cellPositions[i];
       const distance = Cesium.Cartesian3.distance(camera.position, position);
       if (distance > RENDER_DISTANCE_M) continue;
 
-      candidates.push({ index: i, distance, heat: 1 - age / FRONT_WINDOW_MINUTES });
+      candidates.push({ index: i, distance, age });
     }
     candidates.sort((a, b) => a.distance - b.distance);
 
     const usedCells = Math.min(candidates.length, MAX_VOLUMETRIC_CELLS);
     for (let cellSlot = 0; cellSlot < usedCells; cellSlot += 1) {
-      const { index, heat } = candidates[cellSlot];
+      const { index, age } = candidates[cellSlot];
       const scale = flameScaleForFuel(fuelCodes[index]);
       const enuFrame = Cesium.Transforms.eastNorthUpToFixedFrame(cellPositions[index]);
       const east = Cesium.Matrix4.multiplyByPointAsVector(enuFrame, Cesium.Cartesian3.UNIT_X, new Cesium.Cartesian3());
       const north = Cesium.Matrix4.multiplyByPointAsVector(enuFrame, Cesium.Cartesian3.UNIT_Y, new Cesium.Cartesian3());
       const up = Cesium.Matrix4.multiplyByPointAsVector(enuFrame, Cesium.Cartesian3.UNIT_Z, new Cesium.Cartesian3());
+      // ENU wind accel vector in world coordinates for this cell.
+      const wind = new Cesium.Cartesian3(
+        east.x * windEastAccel + north.x * windNorthAccel,
+        east.y * windEastAccel + north.y * windNorthAccel,
+        east.z * windEastAccel + north.z * windNorthAccel
+      );
 
-      for (let layerIndex = 0; layerIndex < FLAME_LAYERS.length; layerIndex += 1) {
-        const layer = FLAME_LAYERS[layerIndex];
-        const systemSlot = cellSlot * FLAME_LAYERS.length + layerIndex;
-        const system = pool[systemSlot];
-        const localOffset = new Cesium.Cartesian3(0, 0, layer.height * scale);
-
-        // Keep the ParticleSystem frame in world coordinates and explicitly
-        // orient its emitter with ENU. Cone +Z is therefore geodetic up at any
-        // latitude instead of inheriting identity/world-axis orientation.
+      for (let kindIndex = 0; kindIndex < SYSTEMS_PER_CELL; kindIndex += 1) {
+        const system = pool[cellSlot * SYSTEMS_PER_CELL + kindIndex];
         system.modelMatrix = Cesium.Matrix4.IDENTITY;
-        system.emitterModelMatrix = Cesium.Matrix4.multiplyByTranslation(
-          enuFrame,
-          localOffset,
-          new Cesium.Matrix4()
-        );
-        system._flameEast = Cesium.Cartesian3.clone(east, system._flameEast);
-        system._flameNorth = Cesium.Cartesian3.clone(north, system._flameNorth);
-        system._flameUp = Cesium.Cartesian3.clone(up, system._flameUp);
-        system.imageSize = new Cesium.Cartesian2(
-          2.4 * scale * layer.scale * VISUAL_CELL_SCALE,
-          5.4 * scale * layer.scale * VISUAL_CELL_SCALE
-        );
-        system.emissionRate = (10 + 15 * heat * scale) * layer.scale;
-        system.maximumSpeed = (5.0 + 4.0 * scale) * (0.9 + 0.12 * layerIndex);
-        system.minimumSpeed = 2.5 * scale;
-        system.show = true;
+        system.emitterModelMatrix = enuFrame;
+        system._pEast = Cesium.Cartesian3.clone(east, system._pEast);
+        system._pNorth = Cesium.Cartesian3.clone(north, system._pNorth);
+        system._pUp = Cesium.Cartesian3.clone(up, system._pUp);
+        system._pWind = Cesium.Cartesian3.clone(wind, system._pWind);
+
+        if (system._pKind === 'smoke') {
+          // Older cells smoke harder than the leading edge (flame there, not
+          // smoke yet); fade back out near the window's end.
+          const smokeAge = Math.min(age / 1.5, 1) * (1 - Math.max(0, (age - 3.5) / (SMOKE_WINDOW_MINUTES - 3.5)) * 0.6);
+          system.emissionRate = (1.2 + 2.4 * smokeAge) * scale;
+          system.show = true;
+        } else {
+          // Embers only at the actively burning leading edge.
+          system.emissionRate = 4 + 4 * scale;
+          system.show = age <= EMBER_WINDOW_MINUTES;
+        }
       }
     }
-    hideAll(usedCells * FLAME_LAYERS.length);
+    hideAll(usedCells * SYSTEMS_PER_CELL);
   }
 
   function onPreRender() {
@@ -292,11 +344,17 @@ export function createFireLOD(viewer) {
     lastUpdate = now;
     dirty = false;
     updateVolumetric();
-    for (const system of pool) configureAdditiveParticleLayer(system);
+    // Additive blending is for embers only. Smoke must stay TRANSLUCENT
+    // (depth test on, depth write off — billboard default): additive smoke
+    // would glow instead of blocking light.
+    for (const system of pool) {
+      if (system._pKind === 'ember') configureAdditiveParticleLayer(system);
+    }
   }
 
   return {
     show(nextResult) {
+      refreshWindFromSliders();
       base.show(nextResult);
       volumetric.show(nextResult);
       result = nextResult;

@@ -91,6 +91,7 @@ const float VISUAL_DILATE_CELLS = ${VISUAL_DILATE_CELLS.toFixed(2)};
 const float TEXEL = 1.0 / GRID_SIZE; // derived from gridSize, never hardcoded
 const float HALF_TEXEL = TEXEL * 0.5;
 const float NEVER_BURNS = 1.0e6;
+const float SMOLDER_WINDOW_MINUTES = 15.0;
 const int RING_TAPS = 8;
 const float TWO_PI = 6.28318530718;
 const float EDGE_FEATHER = 0.08;
@@ -230,22 +231,47 @@ czm_material czm_getMaterial(czm_materialInput materialInput) {
   float pulse = 0.82 + 0.18 * sin(uTime * 5.5);
   float frontPulse = glow * pulse;
 
-  // Static (time-independent) per-cell noise so the charcoal reads as a
-  // textured scar rather than a flat fill. Never touches alpha.
+  // Char variation. All noise is sampled at fireUV * GRID_SIZE — anchored to
+  // the ground rectangle, not the screen — so the pattern is fixed to the
+  // terrain and holds still as the camera moves.
   float scarNoise = fbm3(fireUV * GRID_SIZE * 0.38 + vec2(9.2, 27.4));
-  float noise = 0.82 + 0.18 * scarNoise;
+  // Independent, lower-frequency field for ash patches and unburned islands
+  // so they don't correlate with the fine char texture.
+  float patchNoise = fbm3(fireUV * GRID_SIZE * 0.11 + vec2(41.7, 3.3));
 
-  // Contrast floors: charcoal never disappears against pale dirt, and the
-  // active front is near-white/yellow so it blooms over dark forest too.
-  vec3 charColor = vec3(0.10, 0.085, 0.078) * noise;
+  // Unburned islands: real scars are never solid. Where the patch field
+  // exceeds a threshold — and only behind the active front, so the leading
+  // edge stays a continuous band — leave the ground untouched.
+  float island = smoothstep(0.78, 0.86, patchNoise) * step(uFrontWindow, age);
+  if (island > 0.5) {
+    material.alpha = 0.0;
+    return material;
+  }
+
+  // Ash grey in patches, near-black elsewhere; fine noise on top.
+  vec3 charDark = vec3(0.085, 0.075, 0.070);
+  vec3 ashGrey = vec3(0.30, 0.29, 0.275);
+  vec3 charColor = mix(charDark, ashGrey, smoothstep(0.55, 0.75, patchNoise))
+    * (0.82 + 0.18 * scarNoise);
+
+  // Smoldering interior: cells burned within the last SMOLDER_WINDOW pulse a
+  // dim warm glow, patchy (noise-gated) and slow, so the area behind the
+  // front dies gradually instead of snapping to flat dead black.
+  float smolder = (1.0 - smoothstep(0.0, SMOLDER_WINDOW_MINUTES, age))
+    * smoothstep(0.45, 0.7, scarNoise)
+    * (0.55 + 0.45 * sin(uTime * 1.7 + patchNoise * 31.0));
+  vec3 smolderColor = vec3(0.55, 0.13, 0.02);
+
   vec3 emberColor = vec3(0.9, 0.24, 0.05);
   vec3 flameColor = vec3(1.0, 0.93, 0.75);
 
   vec3 color = mix(charColor, emberColor, smoothstep(0.0, 1.0, frontPulse * 0.85));
   color = mix(color, flameColor, smoothstep(0.0, 1.0, pow(frontPulse, 2.0)));
+  color += smolderColor * smolder * 0.6;
 
   material.diffuse = color;
-  material.emission = color * frontPulse * (1.6 + 2.0 * primaryIntensity) * edgeAlpha;
+  material.emission = color * frontPulse * (1.6 + 2.0 * primaryIntensity) * edgeAlpha
+    + smolderColor * smolder * 0.5 * edgeAlpha;
   // Burned alpha is constant once ignited — it never decays with age. No
   // ember fade-out: the interior of a long run stays solid charcoal forever.
   material.alpha = 0.8 * edgeAlpha;
