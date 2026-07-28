@@ -71,6 +71,7 @@ in vec2 v_textureCoordinates;
 
 uniform float uTime;
 uniform float uActive;
+uniform float uDebug;
 uniform sampler2D uArrivalMap;
 // Box described in EYE space, rebuilt each frame from the camera matrix.
 uniform vec3 uBoxCenterEC;
@@ -149,6 +150,11 @@ void main() {
   if (!intersectBox(ro, rd, t0, t1)) { out_FragColor = sceneColor; return; }
   t0 = max(t0, 0.0);
 
+  // Debug: solid magenta wherever the ray hits the box, BEFORE the depth
+  // clamp and any density work. Separates "is the box on screen at all"
+  // from "does the march produce anything" in one look.
+  if (uDebug > 0.5) { out_FragColor = vec4(1.0, 0.0, 1.0, 1.0); return; }
+
   // Clamp the far end to scene depth so terrain and buildings in front of the
   // volume occlude it instead of fire drawing over them.
   float depth = czm_readDepth(depthTexture, v_textureCoordinates);
@@ -208,6 +214,7 @@ export function createVolumetricFire(viewer) {
   let stage = null;
   let timeMinutes = 0;
   let enabled = false;
+  let debug = false;
   let pending = null;
 
   // Rebuilt per ignition; read every frame by the uniform callbacks.
@@ -252,6 +259,7 @@ export function createVolumetricFire(viewer) {
         uArrivalMap: arrivalTexture,
         uTime: () => timeMinutes,
         uActive: () => (active && enabled ? 1.0 : 0.0),
+        uDebug: () => (debug ? 1.0 : 0.0),
         uBoxCenterEC: () => Cesium.Matrix4.multiplyByPoint(
           viewer.scene.camera.viewMatrix, centreWC, new Cesium.Cartesian3()
         ),
@@ -280,13 +288,30 @@ export function createVolumetricFire(viewer) {
     const midLat = (south + north) / 2;
     const midLon = (west + east) / 2;
 
-    let groundHeight = 0;
-    if (typeof viewer.scene.sampleHeight === 'function') {
+    // Ground height priority:
+    //   1. result.groundHeightMeters — derived from the ignition pick, a real
+    //      Cartesian3 on the actual rendered surface (scene.pickPosition).
+    //   2. scene.sampleHeight at the field centre, secondary only.
+    //   3. NO height available -> skip the build entirely and say so.
+    // Never default to 0: that is the WGS84 ellipsoid, which sits ~100 m
+    // under real terrain in most places. A 40 m box placed there is fully
+    // buried, the depth clamp collapses t1 below t0, and every pixel silently
+    // returns sceneColor — total invisible failure.
+    let groundHeight = Number.isFinite(result.groundHeightMeters)
+      ? result.groundHeightMeters
+      : null;
+    if (groundHeight === null && typeof viewer.scene.sampleHeight === 'function') {
       try {
         const sampled = viewer.scene.sampleHeight(Cesium.Cartographic.fromDegrees(midLon, midLat));
         if (Number.isFinite(sampled)) groundHeight = sampled;
       } catch { /* no pickable surface yet */ }
     }
+    if (groundHeight === null) {
+      console.error('[volumetricFire] no ground height available (pick and sampleHeight both failed) — skipping volume build rather than burying the box at the ellipsoid');
+      return;
+    }
+    console.info('[volumetricFire] build · groundHeight', groundHeight.toFixed(1), 'm ·',
+      Number.isFinite(result.groundHeightMeters) ? 'from ignition pick' : 'from sampleHeight');
 
     const halfEast = Cesium.Cartesian3.distance(
       Cesium.Cartesian3.fromDegrees(west, midLat, groundHeight),
@@ -315,6 +340,14 @@ export function createVolumetricFire(viewer) {
     active = true;
 
     rebuildStage();
+  }
+
+  // Debug toggle, registered here so no other file needs touching:
+  //   window.__ignis.volumeDebug(true)  -> magenta box wherever rays hit
+  //   window.__ignis.volumeDebug(false) -> normal fire
+  if (typeof window !== 'undefined') {
+    window.__ignis = window.__ignis || {};
+    window.__ignis.volumeDebug = (on = true) => { debug = Boolean(on); return debug; };
   }
 
   return {
