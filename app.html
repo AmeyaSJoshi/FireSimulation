@@ -162,7 +162,8 @@
             </span>
             <output id="wind-speed-value">Live weather</output>
           </label>
-          <input id="wind-speed" type="range" min="0" max="60" step="1" value="0" aria-label="Wind speed; zero uses live weather" />
+          <!-- Demo default 18 km/h: an elongated teardrop with a hot head reads as fire; a calm circle reads as a stain. Drag to 0 for live weather. -->
+          <input id="wind-speed" type="range" min="0" max="60" step="1" value="18" aria-label="Wind speed; zero uses live weather" />
         </div>
         <div class="control-row range-row">
           <label for="wind-direction">

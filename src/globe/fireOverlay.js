@@ -223,13 +223,19 @@ czm_material czm_getMaterial(czm_materialInput materialInput) {
   }
 
   float age = uTime - raggedArrival;
-  float front = smoothstep(0.0, 1.0, 1.0 - clamp(age / uFrontWindow, 0.0, 1.0));
+  // Half the previous visual width: the volume owns the flame body now; the
+  // drape band is just the glowing leading edge.
+  float front = smoothstep(0.0, 1.0, 1.0 - clamp(age / (uFrontWindow * 0.5), 0.0, 1.0));
   float glow = pow(front, 2.2);
 
   // The front band stays visibly alive even when spread has stalled: pulse
   // its emission on uTime rather than relying purely on age.
   float pulse = 0.82 + 0.18 * sin(uTime * 5.5);
-  float frontPulse = glow * pulse;
+  // Patchy perimeter: modulate along the front with the terrain-anchored
+  // noise field — flaring in places, smoldering in others, never a uniform
+  // stroke. 0.3..1.0 so no stretch of the front goes fully dark.
+  float bandNoise = fbm3(fireUV * GRID_SIZE * 0.29 + vec2(63.1, 17.9));
+  float frontPulse = glow * pulse * mix(0.3, 1.0, smoothstep(0.25, 0.8, bandNoise));
 
   // Char variation. All noise is sampled at fireUV * GRID_SIZE — anchored to
   // the ground rectangle, not the screen — so the pattern is fixed to the
@@ -263,7 +269,10 @@ czm_material czm_getMaterial(czm_materialInput materialInput) {
   vec3 smolderColor = vec3(0.55, 0.13, 0.02);
 
   vec3 emberColor = vec3(0.9, 0.24, 0.05);
-  vec3 flameColor = vec3(1.0, 0.93, 0.75);
+  // Cap at hot orange-yellow. White-hot must come from bloom on the
+  // brightest pixels after tonemapping, never from the base color — a white
+  // base is exactly the clipped-decal rim this replaces.
+  vec3 flameColor = vec3(1.0, 0.75, 0.3);
 
   vec3 color = mix(charColor, emberColor, smoothstep(0.0, 1.0, frontPulse * 0.85));
   color = mix(color, flameColor, smoothstep(0.0, 1.0, pow(frontPulse, 2.0)));

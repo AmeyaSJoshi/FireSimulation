@@ -168,7 +168,10 @@ const SENSITIVITY_PERTURBATIONS = Object.freeze({
 const SIMULATION_ENGINE = 'phase1';
 const EARTH_RADIUS_KM = 6371;
 const SCENARIO_PRESETS = {
-  calm: { scenario: 'calm', windSpeed: 0, windDirection: 0, deadMoisture: 8, liveMoisture: 60, slope: 0 },
+  // Demo default wind 18 km/h (was 0): an elongated teardrop with a hot head
+  // reads as fire; a calm circle reads as a stain. Physics untouched — this
+  // is only the default input. Slider to 0 restores live weather.
+  calm: { scenario: 'calm', windSpeed: 18, windDirection: 0, deadMoisture: 8, liveMoisture: 60, slope: 0 },
   wind: { scenario: 'calm', windSpeed: 45, windDirection: 45, deadMoisture: 6, liveMoisture: 50, slope: 10 },
   slope: { scenario: 'slope', windSpeed: 0, windDirection: 0, deadMoisture: 8, liveMoisture: 60, slope: 100 },
   barrier: { scenario: 'barrier', windSpeed: 0, windDirection: 0, deadMoisture: 8, liveMoisture: 60, slope: 0 }
@@ -1067,6 +1070,11 @@ function handleGlobeClick(lat, lon, groundHeightMeters = undefined) {
     // uphill flames started underground (depth-clipped into floating caps),
     // downhill flames hovered.
     result.terrainHeights = scenario.context?.terrainHeights ?? null;
+    // What wind did the solve ACTUALLY use? Overridden slider wind, else the
+    // live-weather fetch. A calm burn is a circle; a circle reads as a stain.
+    console.info('[wind]', sliderParams.windSpeed > 0
+      ? `slider override · ${sliderParams.windSpeed} km/h @ ${sliderParams.windDirection} deg`
+      : `live weather · ${scenario.context?.wind?.tenMeterSpeedKmh ?? '?'} km/h @ ${scenario.context?.wind?.compassDirectionDeg ?? '?'} deg`);
     const m = result.metrics;
     const fallbacks = scenario.provenance?.fallbacks ?? [];
     simulationReadout.textContent = fallbacks.length > 0

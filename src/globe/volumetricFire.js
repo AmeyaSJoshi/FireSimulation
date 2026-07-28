@@ -258,7 +258,10 @@ void main() {
     vec3 emission = blackbody(clamp(density * 1.9, 0.0, 1.0))
       * (density + 2.4 * density * density);
 
-    accum += emission * transmittance * stepLen * 0.75;
+    // Tuned for the HDR+ACES pipeline: the old 0.75 was compensating for a
+    // clipping LDR target and read as muddy orange once values stopped
+    // saturating. Filmic rolloff wants real energy to work with.
+    accum += emission * transmittance * stepLen * 1.5;
     transmittance *= exp(-density * stepLen * 1.5);
     if (transmittance < 0.01) break;
   }
